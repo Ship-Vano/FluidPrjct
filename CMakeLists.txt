@@ -3,10 +3,11 @@ project(FluidGPU LANGUAGES CXX CUDA)
 
 # Set CUDA paths explicitly for Arch Linux's non-standard location
 set(CMAKE_CUDA_ARCHITECTURES "native")
-set(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES "/opt/cuda/targets/x86_64-linux/include")
 
-# Find CUDA (this will find cuSPARSE automatically)
+# Find CUDA Toolkit (включая cuDSS)
 find_package(CUDAToolkit REQUIRED)
+
+set(CUDSS_DIR "$ENV{HOME}/cudss")  # Путь к cuDSS
 
 add_executable(FluidGPU
         src/FluidSim/utility.cu
@@ -16,23 +17,29 @@ add_executable(FluidGPU
         main.cpp
 )
 
-# Link CUDA libraries - KEY FIX for Arch Linux
+
+# Упрощаем include-директории (CUDAToolkit сам найдёт пути)
+target_include_directories(FluidGPU PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/json
+        ${CMAKE_SOURCE_DIR}/src/FluidSim
+        "${CUDSS_DIR}/include" # Заголовки cuDSS
+)
+
+target_link_directories(FluidGPU PRIVATE
+        "${CUDSS_DIR}/lib"      # Библиотеки cuDSS
+)
+
+# Добавляем cuDSS в линковку
 target_link_libraries(FluidGPU PRIVATE
+        :libcudss.so.0
         CUDA::cusparse
         CUDA::cudart
 )
 
-# Explicit include paths for Arch Linux
-target_include_directories(FluidGPU PRIVATE
-        ${CMAKE_SOURCE_DIR}/src/json
-        ${CMAKE_SOURCE_DIR}/src/FluidSim
-        "/opt/cuda/targets/x86_64-linux/include"
-)
 
-# Additional linker paths for Arch Linux
-target_link_directories(FluidGPU PRIVATE
-        "/opt/cuda/targets/x86_64-linux/lib"
-)
+
+# Убираем явные указания путей CUDA (find_package справится сам)
+# target_link_directories можно не указывать, если нет проблем
 
 # Set CUDA standard and properties
 set_target_properties(FluidGPU PROPERTIES

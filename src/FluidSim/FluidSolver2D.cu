@@ -39,6 +39,8 @@ void FluidSolver2D::init(std::string fileName){
     v = std::vector<float>(gridWidth*(gridHeight+1), VEL_UNKNOWN);
     vSaved = std::vector<float>(gridWidth*(gridHeight+1), VEL_UNKNOWN);
 
+    fluidNumbers = std::vector<int>(w_x_h, -1);
+
     // Читаем метки построчно
     std::string line;
     int row = 0;
@@ -280,29 +282,40 @@ void FluidSolver2D::applyForces() {
 
 void FluidSolver2D::constructRHS(std::vector<float>& rhs){
     // calculate negative divergence
-    float scale = 1.0f / dx;
+    //float scale = 1.0f / dx;
+    float scale = (FLUID_DENSITY * dx) / dt;
+    int counterFluidCells = 0; //TODO: move to a separate function or change logic!
+    //std::vector<float> rhs2;
     for (int i = 0; i < gridWidth; i++) {
         for (int j = 0; j < gridHeight; j++) {
             if (isFluid(i, j)) {
-                rhs[i*gridHeight+j] = -scale * (u[(i + 1)*gridHeight+j] - u[i*gridHeight+j] + v[i*gridHeight + (j + 1)] - v[i*gridHeight+j]);
+                int newFluidInd = counterFluidCells++;
+                fluidNumbers[i*gridHeight+j] = newFluidInd; //TODO: move to a separate function or change logic!
+
+                //rhs[i*gridHeight+j] = -scale * (u[(i + 1)*gridHeight+j] - u[i*gridHeight+j] + v[i*gridHeight + (j + 1)] - v[i*gridHeight+j]);
+                rhs[newFluidInd] =  -scale * (u[(i + 1)*gridHeight+j] - u[i*gridHeight+j] + v[i*gridHeight + (j + 1)] - v[i*gridHeight+j]);
                 // if it's on boundary must update to consider solid velocity
                 // TODO create actual solid velocity grids, for right now just 0
                 if (labels[(i - 1)*gridHeight+j] == Utility::SOLID) {
-                    rhs[i*gridHeight+j] -= scale * (u[i*gridHeight+j] - 0.0f); //m_usolid[i][j]
+                    //rhs[i*gridHeight+j] -= scale * (u[i*gridHeight+j] - 0.0f); //m_usolid[i][j]
+                    rhs[newFluidInd]-= scale * (u[i*gridHeight+j] - 0.0f);
                 }
                 if (labels[(i + 1)*gridHeight+j] == Utility::SOLID) {
-                    rhs[i*gridHeight+j] += scale * (u[(i + 1)*gridHeight+j] - 0.0f); //m_usolid[i+1][j]
+                    //rhs[i*gridHeight+j] += scale * (u[(i + 1)*gridHeight+j] - 0.0f); //m_usolid[i+1][j]
+                    rhs[newFluidInd] +=  scale * (u[(i + 1)*gridHeight+j] - 0.0f);
                 }
                 if (labels[i*gridHeight+(j - 1)] == Utility::SOLID) {
-                    rhs[i*gridHeight+j] -= scale * (v[i*gridHeight+j] - 0.0f); //m_vsolid[i][j]
+                    //rhs[i*gridHeight+j] -= scale * (v[i*gridHeight+j] - 0.0f); //m_vsolid[i][j]
+                    rhs[newFluidInd]  -= scale * (v[i*gridHeight+j] - 0.0f);
                 }
                 if (labels[i*gridHeight+(j + 1)] == Utility::SOLID) {
-                    rhs[i*gridHeight+j] += scale * (v[i*gridHeight+(j + 1)] - 0.0f); //m_vsolid[i][j+1]
+                    //rhs[i*gridHeight+j] += scale * (v[i*gridHeight+(j + 1)] - 0.0f); //m_vsolid[i][j+1]
+                    rhs[newFluidInd] += scale * (v[i*gridHeight+(j + 1)] - 0.0f);
                 }
             }
         }
     }
-
+    fluidCellsAmount = counterFluidCells;
 }
 
 /*
@@ -314,50 +327,261 @@ Adiag - grid to store the diagonal of the matrix in.
 Ax - grid to store the coefficients for pressure in the (i+1) cell for each grid cell with x index i
 Ay - grid to store the coefficients for pressure in the (j+1) cell for each grid cell with y index j
 */
-void FluidSolver2D::constructA(std::vector<float>& Adiag, std::vector<float>& Ax, std::vector<float>& Ay) {
+void FluidSolver2D::constructA(std::vector<float>& csr_values, std::vector<int>& csr_columns, std::vector<int>& csr_offsets) {
 
     // populate with coefficients for pressure unknowns
-    float scale = dt / (FLUID_DENSITY * dx * dx);
+    //float scale = dt / (FLUID_DENSITY * dx * dx);
+
+    int offset = 0;
+    float scale = 1.0f;
     for (int i = 0; i < gridWidth; ++i) {
         for (int j = 0; j < gridHeight; ++j) {
-            if (isFluid(i, j)) {
+            int newFluidInd = fluidNumbers[i*gridHeight + j];
+            if (newFluidInd != -1) {
+                float diagVal = 0.0f;
+                float rightVal = 0.0f;
+                bool rvIsNZ = false;
+                float botVal = 0.0f;
+                bool bvIsNZ = false;
                 // handle negative x neighbor
                 if (labels[(i - 1)*gridHeight+j] == Utility::FLUID || labels[(i - 1)*gridHeight+j] == Utility::AIR) {
-                    Adiag[i*gridHeight+j] += scale;
+                    //Adiag[i*gridHeight+j] += scale;
+                    diagVal += scale;
                 }
                 // handle positive x neighbor
                 if (labels[(i + 1)*gridHeight+j] == Utility::FLUID) {
-                    Adiag[i*gridHeight+j] += scale;
-                    Ax[i*gridHeight+j] = -scale;
+                    //Adiag[i*gridHeight+j] += scale;
+                    //Ax[i*gridHeight+j] = -scale;
+                    diagVal += scale;
+                    botVal = -scale;
+                    bvIsNZ = true;
                 } else if (labels[(i + 1)*gridHeight+j] == Utility::AIR) {
-                    Adiag[i*gridHeight+j] += scale;
+                   // Adiag[i*gridHeight+j] += scale;
+                    diagVal += scale;
                 }
                 // handle negative y neighbor
                 if (labels[i*gridHeight +(j - 1)] == Utility::FLUID || labels[i*gridHeight +(j - 1)] == Utility::AIR) {
-                    Adiag[i*gridHeight+j] += scale;
+                    //Adiag[i*gridHeight+j] += scale;
+                    diagVal += scale;
                 }
                 // handle positive y neighbor
                 if (labels[i*gridHeight +(j + 1)] == Utility::FLUID) {
-                    Adiag[i*gridHeight+j] += scale;
-                    Ay[i*gridHeight+j] = -scale;
+                    //Adiag[i*gridHeight+j] += scale;
+                    //Ay[i*gridHeight+j] = -scale;
+                    diagVal += scale;
+                    rightVal = -scale;
+                    rvIsNZ = true;
                 } else if (labels[i*gridHeight +(j + 1)] == Utility::AIR) {
-                    Adiag[i*gridHeight+j] += scale;
+                    //Adiag[i*gridHeight+j] += scale;
+                    diagVal += scale;
                 }
+
+                csr_offsets[newFluidInd] = offset;
+                csr_values.push_back(diagVal);
+                csr_columns.push_back(newFluidInd);
+                ++offset;
+                if(rvIsNZ){
+                    csr_values.push_back(rightVal);
+                    csr_columns.push_back(fluidNumbers[i*gridHeight +(j + 1)]);
+                    ++offset;
+                }
+                if(bvIsNZ){
+                    csr_values.push_back(botVal);
+                    csr_columns.push_back(fluidNumbers[(i + 1)*gridHeight+j]);
+                    ++offset;
+                }
+
             }
         }
     }
+    csr_offsets.back() = csr_values.size();
+
+    /*DEBUG COUT
+     * for(int i = 0; i < csr_values.size(); ++i){
+        std::cout << csr_values[i] << ", ";
+    }
+    std::cout << "\n------\n";
+    for(int i = 0; i <csr_columns.size(); ++i){
+        std::cout << csr_columns[i] << ", ";
+    }
+    std::cout << "\n------\n";
+    for(int i = 0; i < csr_offsets.size(); ++i){
+        std::cout << csr_offsets[i] << ", ";
+    }
+    std::cout << "\n------\n";*/
 }
 
-void FluidSolver2D::pressureSolve() {
+#define CUDA_CALL_AND_CHECK(call, msg) \
+    do { \
+        cuda_error = call; \
+        if (cuda_error != cudaSuccess) { \
+            printf("CALL FAILED: CUDA API returned error = %d, details: " #msg "\n", cuda_error); \
+            CUDSS_EXAMPLE_FREE; \
+            return -1; \
+        } \
+    } while(0);
+
+
+#define CUDSS_CALL_AND_CHECK(call, status, msg) \
+    do { \
+        status = call; \
+        if (status != CUDSS_STATUS_SUCCESS) { \
+            printf("CALL FAILED: CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
+            CUDSS_EXAMPLE_FREE; \
+            return -2; \
+        } \
+    } while(0);
+
+#define CUDSS_EXAMPLE_FREE \
+    do { \
+        free(x_values_h);        \
+        cudaFree(csr_offsets_d); \
+        cudaFree(csr_columns_d); \
+        cudaFree(csr_values_d); \
+        cudaFree(x_values_d); \
+        cudaFree(b_values_d);    \
+    } while(0);
+
+//Строим A, но по-своему
+// 1)создаём массив размера w_x_h, состоящий из новой нумерации
+// по индексу i*gridHeight+j будем получать новую нумерацию для системы
+// 2) проходимся по созданному массиву новой нумерации (i = 0; i < gridWidth, j = 0; j < gridHeight)
+// 2.1) чекаем соседей сверху, слева, снизу, справа для подсчёта количества (коэф на диагонали в новой матрице)
+// (i+1,j), (i,  j+1) по старой нумерации: берём, находим новую нумерацию и в эти новые индексы заиписываем для новой матрицы
+// 2.2) создаём ещё параллельно вектор правой части в новой нумерации
+// 3) после создания массивов для csr создаём cuSparce матрицу, указываем всвойства симметрии и тд
+// 4) запихиваем в решатель, получаем результат
+// 5) полученные давления в старую нумерацию и делаем pressureProjectiion (почитать, возможно, не потребуется возвращение нумерации)
+int FluidSolver2D::pressureSolve() {
+    fluidNumbers = std::vector<int>(w_x_h, -1);
     std::vector<float> rhs(w_x_h, 0.0f);
     constructRHS(rhs);
-    std::vector<float> Adiag(w_x_h, 0.0f);
-    std::vector<float> Ax(w_x_h, 0.0f);
-    std::vector<float> Ay(w_x_h, 0.0f);
-    constructA(Adiag, Ax, Ay);
-    //TODO:
-    //precon = constructPrecon()
-    //PCG(Adiag, Ax, Ay, rhs, precon);
+    std::vector<float> csr_values;
+    std::vector<int> csr_columns;
+    std::vector<int> csr_offsets(fluidCellsAmount+1, fluidCellsAmount);
+    constructA(csr_values, csr_columns, csr_offsets);
+
+    cudaError_t cuda_error = cudaSuccess;
+    cudssStatus_t status = CUDSS_STATUS_SUCCESS;
+
+    int n = fluidCellsAmount;
+    int nnz = csr_values.size();
+    int nrhs = 1;
+
+    float *x_values_h = NULL;
+    x_values_h = (float*)malloc(nrhs * n * sizeof(float));
+    if (!x_values_h) {
+        printf("Error: host memory allocation failed\n");
+        return -1;
+    }
+
+    int *csr_offsets_d = NULL;
+    int *csr_columns_d = NULL;
+    float *csr_values_d = NULL;
+    float *x_values_d = NULL, *b_values_d = NULL;
+
+    /* Allocate device memory for A, x and b */
+    CUDA_CALL_AND_CHECK(cudaMalloc(&csr_offsets_d, (n + 1) * sizeof(int)),
+                        "cudaMalloc for csr_offsets");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&csr_columns_d, nnz * sizeof(int)),
+                        "cudaMalloc for csr_columns");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&csr_values_d, nnz * sizeof(float )),
+                        "cudaMalloc for csr_values");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&b_values_d, nrhs * n * sizeof(float)),
+                        "cudaMalloc for b_values");
+    CUDA_CALL_AND_CHECK(cudaMalloc(&x_values_d, nrhs * n * sizeof(float)),
+                        "cudaMalloc for x_values");
+
+    /* Copy host memory to device for A and b */
+    CUDA_CALL_AND_CHECK(cudaMemcpy(csr_offsets_d, csr_offsets.data(), (n + 1) * sizeof(int),
+                                   cudaMemcpyHostToDevice), "cudaMemcpy for csr_offsets");
+    CUDA_CALL_AND_CHECK(cudaMemcpy(csr_columns_d, csr_columns.data(), nnz * sizeof(int),
+                                   cudaMemcpyHostToDevice), "cudaMemcpy for csr_columns");
+    CUDA_CALL_AND_CHECK(cudaMemcpy(csr_values_d, csr_values.data(), nnz * sizeof(float),
+                                   cudaMemcpyHostToDevice), "cudaMemcpy for csr_values");
+    CUDA_CALL_AND_CHECK(cudaMemcpy(b_values_d, rhs.data(), nrhs * n * sizeof(float),
+                                   cudaMemcpyHostToDevice), "cudaMemcpy for b_values");
+
+    /* Create a CUDA stream */
+    cudaStream_t stream = NULL;
+    CUDA_CALL_AND_CHECK(cudaStreamCreate(&stream), "cudaStreamCreate");
+
+    /* Creating the cuDSS library handle */
+    cudssHandle_t handle;
+
+    CUDSS_CALL_AND_CHECK(cudssCreate(&handle), status, "cudssCreate");
+
+    /* (optional) Setting the custom stream for the library handle */
+    CUDSS_CALL_AND_CHECK(cudssSetStream(handle, stream), status, "cudssSetStream");
+
+    /* Creating cuDSS solver configuration and data objects */
+    cudssConfig_t solverConfig;
+    cudssData_t solverData;
+
+    CUDSS_CALL_AND_CHECK(cudssConfigCreate(&solverConfig), status, "cudssConfigCreate");
+    CUDSS_CALL_AND_CHECK(cudssDataCreate(handle, &solverData), status, "cudssDataCreate");
+
+    /* Create matrix objects for the right-hand side b and solution x (as dense matrices). */
+    cudssMatrix_t x, b;
+
+    int64_t nrows = n, ncols = n;
+    int ldb = ncols, ldx = nrows;
+    CUDSS_CALL_AND_CHECK(cudssMatrixCreateDn(&b, ncols, nrhs, ldb, b_values_d, CUDA_R_32F,
+                                             CUDSS_LAYOUT_COL_MAJOR), status, "cudssMatrixCreateDn for b");
+    CUDSS_CALL_AND_CHECK(cudssMatrixCreateDn(&x, nrows, nrhs, ldx, x_values_d, CUDA_R_32F,
+                                             CUDSS_LAYOUT_COL_MAJOR), status, "cudssMatrixCreateDn for x");
+
+    /* Create a matrix object for the sparse input matrix. */
+    cudssMatrix_t A;
+    cudssMatrixType_t mtype     = CUDSS_MTYPE_SPD;
+    cudssMatrixViewType_t mview = CUDSS_MVIEW_UPPER;
+    cudssIndexBase_t base       = CUDSS_BASE_ZERO;
+    CUDSS_CALL_AND_CHECK(cudssMatrixCreateCsr(&A, nrows, ncols, nnz, csr_offsets_d, NULL,
+                                              csr_columns_d, csr_values_d, CUDA_R_32I, CUDA_R_32F, mtype, mview,
+                                              base), status, "cudssMatrixCreateCsr");
+
+    /* Symbolic factorization */
+    CUDSS_CALL_AND_CHECK(cudssExecute(handle, CUDSS_PHASE_ANALYSIS, solverConfig, solverData,
+                                      A, x, b), status, "cudssExecute for analysis");
+
+    /* Factorization */
+    CUDSS_CALL_AND_CHECK(cudssExecute(handle, CUDSS_PHASE_FACTORIZATION, solverConfig,
+                                      solverData, A, x, b), status, "cudssExecute for factor");
+
+    /* Solving */
+    CUDSS_CALL_AND_CHECK(cudssExecute(handle, CUDSS_PHASE_SOLVE, solverConfig, solverData,
+                                      A, x, b), status, "cudssExecute for solve");
+
+    /* Destroying opaque objects, matrix wrappers and the cuDSS library handle */
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(A), status, "cudssMatrixDestroy for A");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(b), status, "cudssMatrixDestroy for b");
+    CUDSS_CALL_AND_CHECK(cudssMatrixDestroy(x), status, "cudssMatrixDestroy for x");
+    CUDSS_CALL_AND_CHECK(cudssDataDestroy(handle, solverData), status, "cudssDataDestroy");
+    CUDSS_CALL_AND_CHECK(cudssConfigDestroy(solverConfig), status, "cudssConfigDestroy");
+    CUDSS_CALL_AND_CHECK(cudssDestroy(handle), status, "cudssHandleDestroy");
+
+    CUDA_CALL_AND_CHECK(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
+
+    /* Print the solution and compare against the exact solution */
+    CUDA_CALL_AND_CHECK(cudaMemcpy(x_values_h, x_values_d, nrhs * n * sizeof(float),
+                                   cudaMemcpyDeviceToHost), "cudaMemcpy for x_values");
+
+    int passed = 1;
+    for (int i = 0; i < n; i++) {
+        printf("x[%d] = %1.4f\n", i, x_values_h[i]);
+    }
+
+    /* Release the data allocated on the user side */
+
+    CUDSS_EXAMPLE_FREE;
+
+    if (status == CUDSS_STATUS_SUCCESS && passed)
+        printf("PRESSURE SOLVE PASSED\n");
+    else
+        printf("PRESSURE SOLVE FAILED\n");
+
+    return 0;
+
 }
 
 void FluidSolver2D::applyPressure() {

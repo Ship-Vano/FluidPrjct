@@ -2,7 +2,8 @@
 #define UTILITY_H
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-#include "cusparse.h"
+#include <cusparse.h>
+#include "cudss.h"
 
 #include <random>
 #include <iostream>

@@ -3,3 +3,4 @@
 
 __device__ float3 calc();
 void out();
+int cuDSStest();

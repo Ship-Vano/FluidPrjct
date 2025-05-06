@@ -4,6 +4,7 @@
 #include <fstream>
 #include <random>
 
+
 __global__ void labelCellWrap(int* labels, Utility::Particle2D* particles, float dx, int gridHeight);
 __device__ void labelCellFluid(int ind, int* labels, Utility::Particle2D* particles, float dx, int gridHeight);
 __device__ void labelCellClean(int ind, int* labels);
@@ -43,6 +44,11 @@ private:
     // saved grid of vel y component for FLIP update, size (nx, ny+1)
     std::vector<float> vSaved;
 
+    // new renumbering of fluid cells for pressure solve fluidNumbers(i * gridHeight + j) = new_index in A indexing
+    // Important! new_ind = -1 => a cell is NOT a FLUID one.
+    std::vector<int> fluidNumbers;
+    int fluidCellsAmount;
+
     //Simulation parameters
     const int VEL_UNKNOWN = INT_MIN;
     // number of particles to seed in each cell at start of sim
@@ -77,7 +83,7 @@ private:
     void particlesToGrid();
     void saveVelocities();
     void applyForces();
-    void pressureSolve();
+    int pressureSolve();
     void applyPressure();
     void gridToParticles(float alpha);
     void advectParticles(int C);
@@ -85,7 +91,7 @@ private:
     // helpers
     bool isFluid(int i, int j);
     void constructRHS(std::vector<float>& rhs);
-    void constructA(std::vector<float>& Adiag, std::vector<float>& Ax, std::vector<float>& Ay);
+    void constructA(std::vector<float>& csr_values, std::vector<int>& csr_columns, std::vector<int>& csr_offsets);
 
 public:
     /*
