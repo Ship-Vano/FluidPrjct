@@ -453,6 +453,7 @@ void FluidSolver2D::constructA(std::vector<float>& csr_values, std::vector<int>&
 // 4) запихиваем в решатель, получаем результат
 // 5) полученные давления в старую нумерацию и делаем pressureProjectiion (почитать, возможно, не потребуется возвращение нумерации)
 int FluidSolver2D::pressureSolve() {
+    p.assign(w_x_h, 0.0f);
     fluidNumbers = std::vector<int>(w_x_h, -1);
     std::vector<float> rhs(w_x_h, 0.0f);
     constructRHS(rhs);
@@ -566,19 +567,31 @@ int FluidSolver2D::pressureSolve() {
     CUDA_CALL_AND_CHECK(cudaMemcpy(x_values_h, x_values_d, nrhs * n * sizeof(float),
                                    cudaMemcpyDeviceToHost), "cudaMemcpy for x_values");
 
-    int passed = 1;
-    for (int i = 0; i < n; i++) {
-        printf("x[%d] = %1.4f\n", i, x_values_h[i]);
-    }
+//    int passed = 1;
+//    for (int i = 0; i < n; i++) {
+//        printf("x[%d] = %1.4f r[%d] = %1.4f\n;", i, x_values_h[i], i, rhs[i]);
+//    }
 
     /* Release the data allocated on the user side */
 
+    for(int i = 0; i < gridWidth; ++i){
+        for(int j = 0; j < gridHeight; ++j){
+            int newFluidInd = fluidNumbers[i*gridHeight + j];
+            if(newFluidInd != -1){
+                p[i*gridHeight + j] = x_values_h[newFluidInd];
+            }
+        }
+    }
+
     CUDSS_EXAMPLE_FREE;
 
-    if (status == CUDSS_STATUS_SUCCESS && passed)
-        printf("PRESSURE SOLVE PASSED\n");
-    else
+    if(status !=CUDSS_STATUS_SUCCESS ){
         printf("PRESSURE SOLVE FAILED\n");
+    }
+//    if (status == CUDSS_STATUS_SUCCESS && passed)
+//        printf("PRESSURE SOLVE PASSED\n");
+//    else
+//        printf("PRESSURE SOLVE FAILED\n");
 
     return 0;
 
