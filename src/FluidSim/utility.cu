@@ -40,7 +40,7 @@ __device__ float2 operator*(const float2& a, float b) {
 
 namespace Utility {
     float2 getGridCellPosition(float i, float j, float dx) {
-        return float2{(i +0.5f)* dx, (j + 0.5f) * dx};
+        return make_float2((i +0.5f)* dx, (j + 0.5f) * dx);
     }
 
     void saveParticlesToFile(const std::vector<Particle2D>& particles,
@@ -72,9 +72,14 @@ namespace Utility {
         }
     }
 
-    __device__ int getGridCellIndex(float2 pos, float dx, int gridHeight){
+    int2 getGridCellIndex(float2 pos, float dx){
+        return make_int2((int)(pos.x / dx), (int)(pos.y/dx));
+    }
+
+    __device__ int getGridCellIndex_device(float2 pos, float dx, int gridHeight){
         return (int)(pos.x / dx) * gridHeight + (int)(pos.y / dx);
     }
+
 
     __device__ float2 getGridCellPosition_device(float i, float j, float dx){
         return float2{(i+0.5f)*dx, (j+0.5f)*dx};

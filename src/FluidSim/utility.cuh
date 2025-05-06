@@ -48,6 +48,7 @@ namespace Utility {
     };
 
     float2 getGridCellPosition(float i, float j, float dx);
+    int2 getGridCellIndex(float2 pos, float dx);
 
     void saveParticlesToFile(const std::vector<Particle2D>& particles,
                              const std::string& filename);
@@ -55,7 +56,7 @@ namespace Utility {
                             const std::string& filename);
 
 
-    __device__ int getGridCellIndex(float2 pos, float dx, int gridHeight);
+    __device__ int getGridCellIndex_device(float2 pos, float dx, int gridHeight);
 
     __device__ float2 getGridCellPosition_device(float i, float j, float dx);
 

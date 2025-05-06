@@ -66,7 +66,7 @@ void FluidSolver2D::init(std::string fileName){
 
     file.close();
 
-    seedParticles(3, particles);
+    seedParticles(PARTICLES_PER_CELL, particles);
     blocksForParticles = (particles->size() + threadsPerBlock - 1) / threadsPerBlock;
     std::cout <<"Number of particles is" << particles->size() << std::endl;
     Utility::saveParticlesToPLY(*particles, "InputData/particles_0.ply");
@@ -85,7 +85,7 @@ void FluidSolver2D::seedParticles(int particlesPerCell, std::vector<Utility::Par
     // Проходим по всем ячейкам с жидкостью
     for (int i = 0; i < gridWidth; ++i) {
         for (int j = 0; j < gridHeight; ++j) {
-            if (labels[i * gridHeight + j] == Utility::FLUID) {
+            if (labels[i *gridHeight + j] == Utility::FLUID) {
                 float2 cellCenter = Utility::getGridCellPosition(i, j, dx);
                 float2 subCenters[4] = {
                         {cellCenter.x - 0.25f * dx, cellCenter.y + 0.25f * dx}, // top-left
@@ -126,7 +126,7 @@ __global__ void labelCellWrap(int* labels, Utility::Particle2D* particles, float
 }
 
 __device__ void labelCellFluid(int ind, int* labels, Utility::Particle2D* particles, float dx, int gridHeight){
-    int cellInd = Utility::getGridCellIndex(particles[ind].pos, dx, gridHeight);
+    int cellInd = Utility::getGridCellIndex_device(particles[ind].pos, dx, gridHeight);
     labels[cellInd] = Utility::FLUID;
 }
 
@@ -637,18 +637,285 @@ void FluidSolver2D::applyPressure() {
     }
 }
 
+/*
+Interpolates the value in the given velocity grid at the given position using bilinear interpolation.
+Returns velocity unkown if position is not on simulation grid.
+Args:
+uGrid - the u component grid to interpolate from
+vGrid - the v component grid to interpolate from
+pos - the position to interpolate at
+*/
+float2 FluidSolver2D::interpVel(std::vector<float>& uGrid, std::vector<float>& vGrid, float2 pos) {
+    // get grid cell containing position
+    int2 cell = Utility::getGridCellIndex(pos, dx);
+    int i = cell.x;
+    int j = cell.y;
+
+    // make sure this is a valid index
+    if (i >= 0 && i < gridWidth && j >= 0 && j < gridHeight) {
+        // get positions of u and v component stored on each side of cell
+        float2 cellLoc = Utility::getGridCellPosition(i, j, dx);
+        float offset = dx / 2.0f;
+        float x1 = cellLoc.x - offset;
+        float x2 = cellLoc.x + offset;
+        float y1 = cellLoc.y - offset;
+        float y2 = cellLoc.y + offset;
+        // get actual values at these positions
+        float u1 = uGrid[i*gridHeight + j];
+        float u2 = uGrid[(i + 1)*gridHeight+j];
+        float v1 = vGrid[i*gridHeight + j];
+        float v2 = vGrid[i*gridHeight+(j + 1)];
+
+        // the interpolated values
+        float u = ((x2 - pos.x) / (x2 - x1)) * u1 + ((pos.x - x1) / (x2 - x1)) * u2;
+        float v = ((y2 - pos.y) / (y2 - y1)) * v1 + ((pos.y - y1) / (y2 - y1)) * v2;
+        return make_float2(u, v);
+    } else {
+        return make_float2(VEL_UNKNOWN, VEL_UNKNOWN);
+    }
+}
+
 void FluidSolver2D::gridToParticles(float alpha) {
-    //TODO
+    std::vector<float> duGrid((gridWidth+1)*gridHeight, 0.0f);
+    std::vector<float> dvGrid((gridWidth)*(gridHeight+1), 0.0f);
+    // calc u grid
+    for (int i = 0; i < gridWidth + 1; i++) {
+        for (int j = 0; j < gridHeight; j++) {
+            duGrid[i*gridHeight + j] = u[i*gridHeight + j] - uSaved[i*gridHeight + j];
+        }
+    }
+    // calc v grid
+    for (int i = 0; i < gridWidth; i++) {
+        for (int j = 0; j < gridHeight + 1; j++) {
+            dvGrid[i*gridHeight + j] = v[i*gridHeight + j] - vSaved[i*gridHeight + j];
+        }
+    }
+
+    // go through particles and interpolate each velocity component
+    // the update is a PIC/FLIP mix weighted with alpha
+    // alpha = 1.0 is entirely PIC, alpha = 0.0 is all FLIP
+    for (int i = 0; i < particles->size(); i++) {
+        Utility::Particle2D *curParticle = &(particles->at(i));
+        float2 picInterp = interpVel(u, v, curParticle->pos);
+        float2 flipInterp = interpVel(duGrid, dvGrid, curParticle->pos);
+        // u_new = alpha * interp(u_gridNew, x_p) + (1 - alpha) * (u_pOld + interp(u_dGrid, x_p))
+        //curParticle->vel = add(scale(picInterp, alpha), scale(add(curParticle->vel, flipInterp), 1.0f - alpha));
+        curParticle->vel.x = picInterp.x * alpha + (curParticle->vel.x + flipInterp.x) * (1.0f - alpha);
+        curParticle->vel.y = picInterp.y * alpha + (curParticle->vel.y + flipInterp.y) * (1.0f - alpha);
+    }
+
+}
+
+/*
+Advects a particle using Runge-Kutta 3 through the given velocity field.
+Args:
+particle - the particle to advect
+initVel - the particles initial velocity in the current field, can leave UNKNOWN
+dt - the time step
+uGrid/vGrid - the velocity grids to advect through
+*/
+void FluidSolver2D::RK3(Utility::Particle2D *particle, float2 initVel, float dt, std::vector<float>& uGrid, std::vector<float>& vGrid) {
+    if (initVel.x == VEL_UNKNOWN && initVel.y == VEL_UNKNOWN) {
+        initVel = interpVel(uGrid, vGrid, particle->pos);
+    }
+
+    float2 k1 = initVel;
+    float2 k1_cpy{k1.x * 0.5f*dt + particle->pos.x, k1.y * 0.5f*dt+ particle->pos.y};
+    float2 k2 = interpVel(uGrid, vGrid, k1_cpy);
+    float2 k2_cpy{k2.x * 0.75f*dt + particle->pos.x, k2.y * 0.75f*dt+ particle->pos.y};
+    float2 k3 = interpVel(uGrid, vGrid, k2_cpy);
+    k1 = make_float2(k1.x *  (2.0f / 9.0f)*dt, k1.y * (2.0f / 9.0f)*dt);
+    k2 =  make_float2(k2.x *  (3.0f / 9.0f)*dt, k2.y * (3.0f / 9.0f)*dt);
+    k3 = make_float2(k3.x *  (4.0f / 9.0f)*dt, k3.y * (4.0f / 9.0f)*dt);
+
+    particle->pos = make_float2(particle->pos.x + k1.x + k2.x + k3.x, particle->pos.y + k1.y + k2.y + k3.y);
+}
+
+std::vector<int> FluidSolver2D::checkNeighbors(std::vector<int> grid, int2 dim, int2 index, int neighbors[][2], int numNeighbors, int value) {
+    std::vector<int> neighborsTrue;
+    for (int i = 0; i < numNeighbors; i++) {
+        int offsetX = neighbors[i][0];
+        int offsetY = neighbors[i][1];
+        int neighborX = index.x + offsetX;
+        int neighborY = index.y + offsetY;
+
+        // make sure valid indices
+        if ((neighborX >= 0 && neighborX < dim.x) && (neighborY >= 0 && neighborY < dim.y)) {
+            if (grid[neighborX * gridHeight + neighborY] == value) {
+                neighborsTrue.push_back(i);
+            }
+        }
+    }
+
+    return neighborsTrue;
+}
+
+
+bool FluidSolver2D::projectParticle(Utility::Particle2D* particle, float dx){
+    // project back into fluid
+    // find neighbors that are fluid
+    // define neighbors
+    int numNeighbors = 8;
+    int neighbors[8][2] = {
+            { -1, 1 }, // top left
+            { -1, 0 }, // middle left
+            { -1, -1 }, // bottom left
+            { 0, 1 }, // top middle
+            { 0, -1 }, // bottom middle
+            { 1, 1 }, // top right
+            { 1, 0 }, // middle right
+            { 1, -1 } // bottom right
+    };
+    int2 dim{ gridWidth, gridHeight };
+    int2 cell = Utility::getGridCellIndex(particle->pos, dx);
+    int2 index{ cell.x, cell.y };
+    // get neighbors that are fluid
+    std::vector<int> neighborInd = checkNeighbors(labels, dim, index, neighbors, numNeighbors, Utility::FLUID);
+    if (neighborInd.size() == 0) {
+        // try with air
+        neighborInd = checkNeighbors(labels, dim, index, neighbors, numNeighbors, Utility::AIR);
+    }
+    // find closest to particle
+    int closestInd = -1;
+    float closestDist = std::numeric_limits<float>::max();
+    float2 closestVec{0.0f, 0.0f};
+    for (int j = 0; j < neighborInd.size(); j++) {
+        // get vec from particle to neighbor ind
+        int ind[2] = { cell.x + neighbors[neighborInd.at(j)][0], cell.y + neighbors[neighborInd.at(j)][1] };
+        float2 cellPos = Utility::getGridCellPosition(ind[0], ind[1], dx);
+        float2 distVec = make_float2(cellPos.x - particle->pos.x, cellPos.y - particle->pos.y);
+        float dist = std::sqrt(distVec.x * distVec.x + distVec.y * distVec.y);
+        if (dist < closestDist) {
+            closestDist = dist;
+            closestInd = neighborInd.at(j);
+            closestVec = distVec;
+        }
+    }
+
+    if (closestInd == -1) {
+        return false;
+    }
+    else {
+        // project different ways based on where closest neighbor is
+        // also make sure to only project the amount given
+        float2 projectVec{0.0f, 0.0f};
+        if (closestInd == 1) { // middle left
+            projectVec.x = closestVec.x + (-dx + (dx / 2.0f));
+        }
+        else if (closestInd == 3) { // top middle
+            projectVec.y = closestVec.y + (dx - (dx / 2.0f));
+        }
+        else if (closestInd == 4) { // bottom middle
+            projectVec.y = closestVec.y + (-dx + (dx / 2.0f));
+        }
+        else if (closestInd == 6) { // middle right
+            projectVec.x = closestVec.x + (dx - (dx / 2.0f));
+        }
+        else if (closestInd == 5) { // top right
+            projectVec.x = closestVec.x + (dx - (dx / 2.0f));
+            projectVec.y = closestVec.y + (dx - (dx / 2.0f));
+        }
+        else if (closestInd == 0) { // top left
+            projectVec.x = closestVec.x + (-dx + (dx / 2.0f));
+            projectVec.y = closestVec.y + (dx - (dx / 2.0f));
+        }
+        else if (closestInd == 2) { // bottom left
+            projectVec.x = closestVec.x + (-dx + (dx / 2.0f));
+            projectVec.y = closestVec.y + (-dx + (dx / 2.0f));
+        }
+        else if (closestInd == 7) { // bottom right
+            projectVec.x = closestVec.x + (dx - (dx / 2.0f));
+            projectVec.y = closestVec.y + (-dx + (dx / 2.0f));
+        }
+
+        particle->pos = make_float2(particle->pos.x + projectVec.x, particle->pos.y + projectVec.y);
+
+        return true;
+    }
 }
 
 //C - the maximum number of grid cells a particle should move when advected. This helps define substep sizes.
 void FluidSolver2D::advectParticles(int C) {
-    //TODO
+    for (int i = 0; i < particles->size(); i++) {
+        Utility::Particle2D *curParticle = &(particles->at(i));
+        float subTime = 0;
+        bool finished = false;
+        //float dT = m_dt / 4.999f;
+        while (!finished) {
+            float2 curVel = interpVel(u, v, curParticle->pos);
+
+            // calc max substep size
+            float dT = (C * dx) / (std::sqrt(curVel.x*curVel.x + curVel.y*curVel.y) + FLT_MIN);
+            // update substep time so we don't go past normal time step
+            if (subTime + dT >= dt) {
+                dT = dt - subTime;
+                finished = true;
+            } else if (subTime + 2 * dT >= dt) {
+                dT = 0.5f * (dt - subTime);
+            }
+
+            RK3(curParticle, curVel, dT, u, v);
+            subTime += dT;
+
+            if (curParticle->pos.x < 0 || curParticle->pos.y < 0 || std::isnan(curParticle->pos.x) || std::isnan(curParticle->pos.y)) {
+                // there's been an error in RK3, just skip it
+
+                //std::cout << "RK3 error...skipping particle" << std::endl;
+                break;
+            }
+
+            int2 cell = Utility::getGridCellIndex(curParticle->pos, dx);
+            int j = cell.x;
+            int k = cell.y;
+            if (labels[j*gridHeight + k] == Utility::SOLID) {
+                //std::cout << "Advected into SOLID, projecting back!\n";
+                if (!projectParticle(curParticle, dx / 4.0f)) {
+                    //std::cout << "RK3 error...skipping particle" << std::endl;
+                    break;
+                }
+            }
+
+        }
+    }
 }
+
+
 
 //delta - the amount to project stray particles away from the wall.
 void FluidSolver2D::cleanUpParticles(float delta) {
-    //TODO
+    int i = 0;
+    bool finished = false;
+    int numDeleted = 0;
+    while(!finished && particles->size() > 0) {
+        int2 cell = Utility::getGridCellIndex(particles->at(i).pos, dx);
+        int ind[2] = { cell.x, cell.y };
+        // if either of cells are negative or greater than sim dimensions it has left sim area
+        if (ind[0] < 0 || ind[1] < 0 || ind[0] >= gridWidth || ind[1] >= gridHeight || std::isnan(particles->at(i).pos.x) || std::isnan(particles->at(i).pos.y)) {
+            particles->erase(particles->begin() + i);
+            numDeleted++;
+            if (i >= particles->size()) {
+                finished = true;
+            }
+        } else if (labels[ind[0]*gridHeight + ind[1]] == Utility::SOLID) {
+            // project back into fluid
+            bool success = projectParticle(&(particles->at(i)), dx);
+            if (!success) {
+                // no near fluid, just delete
+                particles->erase(particles->begin() + i);
+                numDeleted++;
+                if (i >= particles->size()) {
+                    finished = true;
+                }
+            }
+        } else {
+            i++;
+            if (i >= particles->size()) {
+                finished = true;
+            }
+        }
+    }
+
+    //std::cout << "Removed " << numDeleted << " particles from sim.\n";
 }
 
 void FluidSolver2D::frameStep(){
@@ -711,4 +978,15 @@ bool FluidSolver2D::isFluid(int i, int j) {
     }
 
     return isFluid;
+}
+
+
+void FluidSolver2D::run(int max_steps) {
+    for(int i = 0; i < max_steps; ++i){
+        frameStep();
+        if(i%100 == 0){
+            Utility::saveParticlesToPLY(*particles, "InputData/particles_" + std::to_string(i) + ".ply");
+        }
+
+    }
 }

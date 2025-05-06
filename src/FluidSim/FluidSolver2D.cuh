@@ -1,6 +1,7 @@
 #pragma once
 #include "utility.cuh"
 #include <limits.h>
+#include <float.h>
 #include <fstream>
 #include <random>
 
@@ -52,19 +53,15 @@ private:
     //Simulation parameters
     const int VEL_UNKNOWN = INT_MIN;
     // number of particles to seed in each cell at start of sim
-    const int PARTICLES_PER_CELL = 4;
+    const int PARTICLES_PER_CELL = 8;
     // the amount of weight to give to PIC in PIC/FLIP update
-    const float PIC_WEIGHT = 0.02f;
+    const float PIC_WEIGHT = 0.5f;
     // the maximum number of grid cells a particle should move when advected
     const int ADVECT_MAX = 1;
     // acceleration due to gravity
     const float2 GRAVITY{ 0.0f, -9.81f };
     // density of the fluid (kg/m^3)
     const float FLUID_DENSITY = 1000.0f;
-    // error tolerance for PCG
-    const float PCG_TOL = 0.000001f;
-    // max iterations for PCG
-    const int PCG_MAX_ITERS = 200;
 
     //gpu params
     int threadsPerBlock = 256;
@@ -92,8 +89,12 @@ private:
     bool isFluid(int i, int j);
     void constructRHS(std::vector<float>& rhs);
     void constructA(std::vector<float>& csr_values, std::vector<int>& csr_columns, std::vector<int>& csr_offsets);
+    float2 interpVel(std::vector<float>& uGrid, std::vector<float>& vGrid, float2 pos);
+    bool projectParticle(Utility::Particle2D* particle, float dx);
+    void RK3(Utility::Particle2D *particle, float2 initVel, float dt, std::vector<float>& uGrid, std::vector<float>& vGrid);
+    std::vector<int> checkNeighbors(std::vector<int> grid, int2 dim, int2 index, int neighbors[][2], int numNeighbors, int value);
 
-public:
+    public:
     /*
 	Creates a new 2D fluid solver.
 	Args:
@@ -111,4 +112,5 @@ public:
      * */
     void init(std::string);
 
+    void run(int max_steps);
 };
