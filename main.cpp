@@ -14,7 +14,7 @@ int main(){
     FluidSolver2D solver(512, 512, dx, dt);
     solver.PIC_WEIGHT = (6 * dt)/(dx*dx);
     std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
-    solver.init("InputData/labels_simple.txt");
+    solver.init("InputData/labels_colimn.txt");
     solver.run(3000);
     std::cout << "success!" << std::endl;
     return 0;

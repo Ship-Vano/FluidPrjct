@@ -53,7 +53,7 @@ private:
     //Simulation parameters
     const int VEL_UNKNOWN = INT_MIN;
     // number of particles to seed in each cell at start of sim
-    const int PARTICLES_PER_CELL = 5;
+    const int PARTICLES_PER_CELL = 6;
     // the amount of weight to give to PIC in PIC/FLIP update
 
     // the maximum number of grid cells a particle should move when advected
