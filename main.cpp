@@ -9,9 +9,9 @@
 int main(){
     //cuDSStest();
     //out();
-    FluidSolver2D solver(512, 512, 0.4, 0.001);
+    FluidSolver2D solver(512, 512, 0.1, 0.01);
     solver.init("InputData/labels_simple.txt");
-    //solver.run(10000);
+    //solver.run(100);
     std::cout << "success!" << std::endl;
     return 0;
 }

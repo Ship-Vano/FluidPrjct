@@ -41,17 +41,24 @@ void FluidSolver2D::init(std::string fileName){
 
     fluidNumbers = std::vector<int>(w_x_h, -1);
 
-    // Читаем метки построчно
     std::string line;
-    int row = 0;
+    int totalRows = gridHeight - 1; // Индекс последней строки (низ сетки)
     while (std::getline(file, line)) {
-        if (line.empty()) continue;  // Пропускаем пустые строки
+        if (line.empty()) continue;
+
+        // Обрабатываем строки снизу вверх
+        int currentRow = totalRows--;
+        if (currentRow < 0) {
+            throw std::runtime_error("File has more lines than grid height");
+        }
 
         int col = 0;
         std::istringstream iss(line);
         char symbol;
-        while (iss >> symbol) {
-            int idx = row * gridHeight + col;
+        while (iss >> symbol && col < gridWidth) {
+            // Индекс рассчитывается как: column + row * gridWidth
+            int idx = col + currentRow * gridWidth;
+
             switch (symbol) {
                 case 'S': labels[idx] = Utility::SOLID; break;
                 case 'F': labels[idx] = Utility::FLUID; break;
@@ -61,8 +68,12 @@ void FluidSolver2D::init(std::string fileName){
             }
             ++col;
         }
-        ++row;
+
+        if (col != gridWidth) {
+            throw std::runtime_error("Line width does not match grid width");
+        }
     }
+
 
     file.close();
 
@@ -85,7 +96,7 @@ void FluidSolver2D::seedParticles(int particlesPerCell, std::vector<Utility::Par
     // Проходим по всем ячейкам с жидкостью
     for (int i = 0; i < gridWidth; ++i) {
         for (int j = 0; j < gridHeight; ++j) {
-            if (labels[i *gridHeight + j] == Utility::FLUID) {
+            if (labels[i + j*gridWidth] == Utility::FLUID) {
                 float2 cellCenter = Utility::getGridCellPosition(i, j, dx);
                 float2 subCenters[4] = {
                         {cellCenter.x - 0.25f * dx, cellCenter.y + 0.25f * dx}, // top-left
@@ -984,7 +995,7 @@ bool FluidSolver2D::isFluid(int i, int j) {
 void FluidSolver2D::run(int max_steps) {
     for(int i = 0; i < max_steps; ++i){
         frameStep();
-        if(i%100 == 0){
+        if(i%10 == 0){
             Utility::saveParticlesToPLY(*particles, "InputData/particles_" + std::to_string(i) + ".ply");
         }
 
