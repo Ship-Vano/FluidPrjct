@@ -53,9 +53,9 @@ private:
     //Simulation parameters
     const int VEL_UNKNOWN = INT_MIN;
     // number of particles to seed in each cell at start of sim
-    const int PARTICLES_PER_CELL = 8;
+    const int PARTICLES_PER_CELL = 5;
     // the amount of weight to give to PIC in PIC/FLIP update
-    const float PIC_WEIGHT = 0.1f;
+
     // the maximum number of grid cells a particle should move when advected
     const int ADVECT_MAX = 1;
     // acceleration due to gravity
@@ -95,6 +95,7 @@ private:
     std::vector<int> checkNeighbors(std::vector<int> grid, int2 dim, int2 index, int neighbors[][2], int numNeighbors, int value);
 
     public:
+    float PIC_WEIGHT = 0.5f;
     /*
 	Creates a new 2D fluid solver.
 	Args:

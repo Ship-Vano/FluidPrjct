@@ -9,7 +9,11 @@
 int main(){
     //cuDSStest();
     //out();
-    FluidSolver2D solver(512, 512, 0.1, 0.01);
+    float dt = 0.01;
+    float dx = 0.5;
+    FluidSolver2D solver(512, 512, dx, dt);
+    solver.PIC_WEIGHT = (6 * dt)/(dx*dx);
+    std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
     solver.init("InputData/labels_simple.txt");
     solver.run(3000);
     std::cout << "success!" << std::endl;
