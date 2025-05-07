@@ -1,5 +1,26 @@
 #include "FluidSolver2D.cuh"
 
+#define CUDA_CALL_AND_CHECK(call, msg) \
+    do { \
+        cuda_error = call; \
+        if (cuda_error != cudaSuccess) { \
+            printf("CALL FAILED: CUDA API returned error = %d, details: " #msg "\n", cuda_error); \
+            CUDSS_EXAMPLE_FREE; \
+            return -1; \
+        } \
+    } while(0);
+
+
+#define CUDSS_CALL_AND_CHECK(call, status, msg) \
+    do { \
+        status = call; \
+        if (status != CUDSS_STATUS_SUCCESS) { \
+            printf("CALL FAILED: CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
+            CUDSS_EXAMPLE_FREE; \
+            return -2; \
+        } \
+    } while(0);
+
 //basic funcs################1
 FluidSolver2D::FluidSolver2D(int width, int height, float dx_, float dt_){
     gridWidth = width;
@@ -94,8 +115,8 @@ void FluidSolver2D::seedParticles(int particlesPerCell, std::vector<Utility::Par
     static std::uniform_real_distribution<> jitterDist(-0.24f, 0.24f);
 
     // Проходим по всем ячейкам с жидкостью
+    for (int j = 0; j < gridHeight; ++j) {
     for (int i = 0; i < gridWidth; ++i) {
-        for (int j = 0; j < gridHeight; ++j) {
             if (labels[i + j*gridWidth] == Utility::FLUID) {
                 float2 cellCenter = Utility::getGridCellPosition(i, j, dx);
                 float2 subCenters[4] = {
@@ -131,44 +152,87 @@ void FluidSolver2D::seedParticles(int particlesPerCell, std::vector<Utility::Par
     blocksForParticles = (particles->size() + threadsPerBlock - 1) / threadsPerBlock;
 }
 
-__global__ void labelCellWrap(int* labels, Utility::Particle2D* particles, float dx, int gridHeight){
+__global__ void labelCellWrap(int* labels, Utility::Particle2D* particles, float dx, int gridWidth){
     int ind = blockIdx.x * blockDim.x + threadIdx.x;
-    labelCellClean(ind, labels);
+    labelCellClean(ind, labels, particles, dx,gridWidth);
+    labelCellFluid(ind, labels, particles, dx,gridWidth);
 }
 
-__device__ void labelCellFluid(int ind, int* labels, Utility::Particle2D* particles, float dx, int gridHeight){
-    int cellInd = Utility::getGridCellIndex_device(particles[ind].pos, dx, gridHeight);
+__device__ void labelCellFluid(int ind, int* labels, Utility::Particle2D* particles, float dx, int gridWidth){
+    int cellInd = Utility::getGridCellIndex_device(particles[ind].pos, dx, gridWidth);
     labels[cellInd] = Utility::FLUID;
 }
 
-__device__ void labelCellClean(int ind, int* labels){
-    if(labels[ind] != Utility::SOLID){
-        labels[ind] = Utility::AIR;
+__device__ void labelCellClean(int ind, int* labels, Utility::Particle2D* particles, float dx, int gridWidth){
+    int cellInd = Utility::getGridCellIndex_device(particles[ind].pos, dx, gridWidth);
+    if(labels[cellInd] != Utility::SOLID){
+        labels[cellInd] = Utility::AIR;
     }
 }
 
-void FluidSolver2D::labelGrid() {
-    int* labels_for_device;
-    cudaMalloc(&labels_for_device, sizeof(int)*w_x_h);
-    cudaMemcpy(labels_for_device, labels.data(), sizeof(int)*w_x_h, cudaMemcpyHostToDevice);
-    labelCellWrap<<<blocksForCells, threadsPerBlock>>>(labels_for_device, particles->data(), dx, gridHeight);
-    cudaDeviceSynchronize();
-    cudaFree(labels_for_device);
-    /*DEBUG COUT
-     * for(int i = 0; i < gridWidth; ++i){
-        for(int j =0; j < gridHeight; ++j){
-            int idx = i * gridHeight + j;
-            switch (labels[idx]) {
-                case Utility::SOLID: std::cout<<"S"; break;
-                case Utility::FLUID: std::cout << "F"; break;
-                case Utility::AIR: std::cout << "A" ;   break;
-                default:
-                    throw std::runtime_error("Unknown cell val");
+int FluidSolver2D::labelGrid() {
+    // first clear grid labels (mark everything air, but leave solids)
+    for (int i = 0; i < gridWidth; i++) {
+        for (int j = 0; j < gridHeight; j++) {
+            if (labels[i+j*gridWidth] != Utility::SOLID) {
+                labels[i+j*gridWidth] = Utility::AIR;
             }
         }
-        std::cout<<std::endl;
-    }*/
+    }
+
+    // mark any cell containing a particle FLUID
+    for (int i = 0; i < particles->size(); i++) {
+        // get cell containing the particle
+        int2 cell = Utility::getGridCellIndex(particles->at(i).pos, dx);
+        labels[cell.x + cell.y * gridWidth] = Utility::FLUID;
+    }
+    return 0;
 }
+
+//int FluidSolver2D::labelGrid() {
+//    int particlesAmount = particles->size();
+//    int blockForParticles = (particlesAmount + threadsPerBlock - 1) / threadsPerBlock;
+//    int* labels_for_device = NULL;
+//    cudaDeviceSynchronize();
+//    Utility::Particle2D* particles_for_device;
+//    cudaError_t err;
+//    std::cout << w_x_h << std::endl;
+//    err = cudaMalloc(&labels_for_device, sizeof(int)*w_x_h);
+//    if(err != cudaSuccess) {
+//        std::cerr << "cudaMalloc labels error: " << cudaGetErrorString(err) << err << std::endl;
+//        return -1;
+//    }
+//    cudaMemcpy(labels_for_device, labels.data(), sizeof(int)*w_x_h, cudaMemcpyHostToDevice);
+//    err = cudaMalloc(&particles_for_device, sizeof(Utility::Particle2D)*particles->size());
+//    if(err != cudaSuccess) {
+//        std::cerr << "cudaMalloc particles error: " << cudaGetErrorString(err) << std::endl;
+//        cudaFree(labels_for_device);
+//        return -1;
+//    }
+//    cudaMemcpy(particles_for_device, particles->data(), sizeof(Utility::Particle2D)*particlesAmount, cudaMemcpyHostToDevice);
+//    labelCellWrap<<<blockForParticles, threadsPerBlock>>>(labels_for_device, particles->data(), dx, gridWidth);
+//    cudaDeviceSynchronize();
+//    cudaMemcpy(labels.data(), labels_for_device, sizeof(int)*w_x_h, cudaMemcpyDeviceToHost);
+//    cudaFree(labels_for_device);
+//    cudaFree(particles_for_device);
+////    //DEBUG COUT
+////    for(int j =0; j < gridHeight; ++j){
+////      for(int i = 0; i < gridWidth; ++i){
+////
+////            int idx = i  + j*gridWidth;
+////            switch (labels[idx]) {
+////                case Utility::SOLID: std::cout<<"S"; break;
+////                case Utility::FLUID: std::cout << "F"; break;
+////                case Utility::AIR: std::cout << "A" ;   break;
+////                default:
+////                    throw std::runtime_error("Unknown cell val");
+////            }
+////        }
+////        std::cout<<std::endl;
+////    }
+////    std::cout<<"--------------\n\n"<<std::endl;
+//    return 0;
+//}
 
 
 
@@ -176,13 +240,13 @@ __global__ void accumulateDenAndNum( Utility::Particle2D particle, float* uNum, 
     int ind = blockIdx.x * blockDim.x + threadIdx.x;
     // save check
     if(ind < uSize){
-        int2 uCellInd = Utility::getGridIndicesU(ind, gridHeight);
+        int2 uCellInd = Utility::getGridIndicesU(ind, gridWidth);
         float kernel = Utility::bilinearHatKernel(particle.pos- Utility::getGridCellPosition_device(uCellInd.x, uCellInd.y, dx), dx, dx );
         atomicAdd(&uNum[ind], particle.vel.x * kernel);
         atomicAdd(&uDen[ind], kernel);
     }
     if(ind < vSize){
-        int2 vCellInd = Utility::getGridIndicesV(ind, gridHeight);
+        int2 vCellInd = Utility::getGridIndicesV(ind, gridWidth);
         float kernel = Utility::bilinearHatKernel(particle.pos- Utility::getGridCellPosition_device(vCellInd.x, vCellInd.y, dx), dx, dx );
         atomicAdd(&vNum[ind], particle.vel.y * kernel);
         atomicAdd(&vDen[ind], kernel);
@@ -255,16 +319,16 @@ void FluidSolver2D::particlesToGrid(){
 
 void FluidSolver2D::saveVelocities(){
     // save u grid
+    for (int j = 0; j < gridHeight; j++) {
     for (int i = 0; i < gridWidth + 1; i++) {
-        for (int j = 0; j < gridHeight; j++) {
-            uSaved[i*gridHeight + j] = u[i*gridHeight + j];
+            uSaved[i+ j*gridWidth] = u[i+ j*gridWidth];
         }
     }
 
     // save v grid
+    for (int j = 0; j < gridHeight + 1; j++) {
     for (int i = 0; i < gridWidth; i++) {
-        for (int j = 0; j < gridHeight + 1; j++) {
-            vSaved[i*gridHeight + j] = v[i*gridHeight + j];
+            vSaved[i+ j*gridWidth] = v[i+ j*gridWidth];
         }
     }
 }
@@ -272,19 +336,19 @@ void FluidSolver2D::saveVelocities(){
 void FluidSolver2D::applyForces() {
     // traverse all grid cells and apply force to each velocity component
     // The new velocity is calculated using forward euler
+    for (int j = 0; j < gridHeight + 1; j++) {
     for (int i = 0; i < gridWidth + 1; i++) {
-        for (int j = 0; j < gridHeight + 1; j++) {
             if (j < gridHeight) {
                 // make sure we know the velocity
-                if (u[i*gridHeight + j] != VEL_UNKNOWN) {
+                if (u[i+ j*gridWidth] != VEL_UNKNOWN) {
                     // update u component
-                    u[i*gridHeight + j] += dt*GRAVITY.x;
+                    u[i+ j*gridWidth] += dt*GRAVITY.x;
                 }
             }
             if (i < gridWidth) {
-                if (v[i*gridHeight + j] != VEL_UNKNOWN) {
+                if (v[i+ j*gridWidth] != VEL_UNKNOWN) {
                     // update v component
-                    v[i*gridHeight + j] += dt*GRAVITY.y;
+                    v[i+ j*gridWidth] += dt*GRAVITY.y;
                 }
             }
         }
@@ -297,31 +361,31 @@ void FluidSolver2D::constructRHS(std::vector<float>& rhs){
     float scale = (FLUID_DENSITY * dx) / dt;
     int counterFluidCells = 0; //TODO: move to a separate function or change logic!
     //std::vector<float> rhs2;
-    for (int i = 0; i < gridWidth; i++) {
-        for (int j = 0; j < gridHeight; j++) {
+    for (int j = 0; j < gridHeight; j++) {
+        for (int i = 0; i < gridWidth; i++) {
             if (isFluid(i, j)) {
                 int newFluidInd = counterFluidCells++;
-                fluidNumbers[i*gridHeight+j] = newFluidInd; //TODO: move to a separate function or change logic!
-
+                fluidNumbers[i+ j*gridWidth] = newFluidInd; //TODO: move to a separate function or change logic!
+                //std::cout << "(i,j) = " << j << ", " << i << " ; newFluidInd = " << newFluidInd << std::endl;
                 //rhs[i*gridHeight+j] = -scale * (u[(i + 1)*gridHeight+j] - u[i*gridHeight+j] + v[i*gridHeight + (j + 1)] - v[i*gridHeight+j]);
-                rhs[newFluidInd] =  -scale * (u[(i + 1)*gridHeight+j] - u[i*gridHeight+j] + v[i*gridHeight + (j + 1)] - v[i*gridHeight+j]);
+                rhs[newFluidInd] =  -scale * (u[(i + 1)+j*gridWidth] - u[i+j*gridWidth] + v[i + (j + 1)*gridWidth] - v[i+j*gridWidth]);
                 // if it's on boundary must update to consider solid velocity
                 // TODO create actual solid velocity grids, for right now just 0
-                if (labels[(i - 1)*gridHeight+j] == Utility::SOLID) {
+                if (labels[(i - 1)+j*gridWidth] == Utility::SOLID) {
                     //rhs[i*gridHeight+j] -= scale * (u[i*gridHeight+j] - 0.0f); //m_usolid[i][j]
-                    rhs[newFluidInd]-= scale * (u[i*gridHeight+j] - 0.0f);
+                    rhs[newFluidInd]-= scale * (u[i+j*gridWidth] - 0.0f);
                 }
-                if (labels[(i + 1)*gridHeight+j] == Utility::SOLID) {
+                if (labels[(i + 1)+j*gridWidth] == Utility::SOLID) {
                     //rhs[i*gridHeight+j] += scale * (u[(i + 1)*gridHeight+j] - 0.0f); //m_usolid[i+1][j]
-                    rhs[newFluidInd] +=  scale * (u[(i + 1)*gridHeight+j] - 0.0f);
+                    rhs[newFluidInd] +=  scale * (u[(i + 1)+j*gridWidth] - 0.0f);
                 }
-                if (labels[i*gridHeight+(j - 1)] == Utility::SOLID) {
+                if (labels[i+(j - 1)*gridWidth] == Utility::SOLID) {
                     //rhs[i*gridHeight+j] -= scale * (v[i*gridHeight+j] - 0.0f); //m_vsolid[i][j]
-                    rhs[newFluidInd]  -= scale * (v[i*gridHeight+j] - 0.0f);
+                    rhs[newFluidInd]  -= scale * (v[i+j*gridWidth] - 0.0f);
                 }
-                if (labels[i*gridHeight+(j + 1)] == Utility::SOLID) {
+                if (labels[i+(j + 1)*gridWidth] == Utility::SOLID) {
                     //rhs[i*gridHeight+j] += scale * (v[i*gridHeight+(j + 1)] - 0.0f); //m_vsolid[i][j+1]
-                    rhs[newFluidInd] += scale * (v[i*gridHeight+(j + 1)] - 0.0f);
+                    rhs[newFluidInd] += scale * (v[i+(j + 1)*gridWidth] - 0.0f);
                 }
             }
         }
@@ -345,9 +409,9 @@ void FluidSolver2D::constructA(std::vector<float>& csr_values, std::vector<int>&
 
     int offset = 0;
     float scale = 1.0f;
+    for (int j = 0; j < gridHeight; ++j) {
     for (int i = 0; i < gridWidth; ++i) {
-        for (int j = 0; j < gridHeight; ++j) {
-            int newFluidInd = fluidNumbers[i*gridHeight + j];
+            int newFluidInd = fluidNumbers[i+ j*gridWidth];
             if (newFluidInd != -1) {
                 float diagVal = 0.0f;
                 float rightVal = 0.0f;
@@ -355,34 +419,34 @@ void FluidSolver2D::constructA(std::vector<float>& csr_values, std::vector<int>&
                 float botVal = 0.0f;
                 bool bvIsNZ = false;
                 // handle negative x neighbor
-                if (labels[(i - 1)*gridHeight+j] == Utility::FLUID || labels[(i - 1)*gridHeight+j] == Utility::AIR) {
+                if (labels[(i - 1)+j*gridWidth] == Utility::FLUID || labels[(i - 1)+j*gridWidth] == Utility::AIR) {
                     //Adiag[i*gridHeight+j] += scale;
                     diagVal += scale;
                 }
                 // handle positive x neighbor
-                if (labels[(i + 1)*gridHeight+j] == Utility::FLUID) {
+                if (labels[(i + 1)+j*gridWidth] == Utility::FLUID) {
                     //Adiag[i*gridHeight+j] += scale;
                     //Ax[i*gridHeight+j] = -scale;
                     diagVal += scale;
                     botVal = -scale;
                     bvIsNZ = true;
-                } else if (labels[(i + 1)*gridHeight+j] == Utility::AIR) {
+                } else if (labels[(i + 1)+j*gridWidth] == Utility::AIR) {
                    // Adiag[i*gridHeight+j] += scale;
                     diagVal += scale;
                 }
                 // handle negative y neighbor
-                if (labels[i*gridHeight +(j - 1)] == Utility::FLUID || labels[i*gridHeight +(j - 1)] == Utility::AIR) {
+                if (labels[i+(j - 1)*gridWidth] == Utility::FLUID || labels[i +(j - 1)*gridWidth] == Utility::AIR) {
                     //Adiag[i*gridHeight+j] += scale;
                     diagVal += scale;
                 }
                 // handle positive y neighbor
-                if (labels[i*gridHeight +(j + 1)] == Utility::FLUID) {
+                if (labels[i+(j + 1)*gridWidth] == Utility::FLUID) {
                     //Adiag[i*gridHeight+j] += scale;
                     //Ay[i*gridHeight+j] = -scale;
                     diagVal += scale;
                     rightVal = -scale;
                     rvIsNZ = true;
-                } else if (labels[i*gridHeight +(j + 1)] == Utility::AIR) {
+                } else if (labels[i+(j + 1)*gridWidth] == Utility::AIR) {
                     //Adiag[i*gridHeight+j] += scale;
                     diagVal += scale;
                 }
@@ -393,12 +457,12 @@ void FluidSolver2D::constructA(std::vector<float>& csr_values, std::vector<int>&
                 ++offset;
                 if(rvIsNZ){
                     csr_values.push_back(rightVal);
-                    csr_columns.push_back(fluidNumbers[i*gridHeight +(j + 1)]);
+                    csr_columns.push_back(fluidNumbers[i +(j + 1)*gridWidth]);
                     ++offset;
                 }
                 if(bvIsNZ){
                     csr_values.push_back(botVal);
-                    csr_columns.push_back(fluidNumbers[(i + 1)*gridHeight+j]);
+                    csr_columns.push_back(fluidNumbers[(i + 1)+j*gridWidth]);
                     ++offset;
                 }
 
@@ -407,41 +471,22 @@ void FluidSolver2D::constructA(std::vector<float>& csr_values, std::vector<int>&
     }
     csr_offsets.back() = csr_values.size();
 
-    /*DEBUG COUT
-     * for(int i = 0; i < csr_values.size(); ++i){
-        std::cout << csr_values[i] << ", ";
-    }
-    std::cout << "\n------\n";
-    for(int i = 0; i <csr_columns.size(); ++i){
-        std::cout << csr_columns[i] << ", ";
-    }
-    std::cout << "\n------\n";
-    for(int i = 0; i < csr_offsets.size(); ++i){
-        std::cout << csr_offsets[i] << ", ";
-    }
-    std::cout << "\n------\n";*/
+    //DEBUG COUT
+//    for(int i = 0; i < csr_values.size(); ++i){
+//        std::cout << csr_values[i] << ", ";
+//    }
+//    std::cout << "\n------\n";
+//    for(int i = 0; i <csr_columns.size(); ++i){
+//        std::cout << csr_columns[i] << ", ";
+//    }
+//    std::cout << "\n------\n";
+//    for(int i = 0; i < csr_offsets.size(); ++i){
+//        std::cout << csr_offsets[i] << ", ";
+//    }
+//    std::cout << "\n------\n";
 }
 
-#define CUDA_CALL_AND_CHECK(call, msg) \
-    do { \
-        cuda_error = call; \
-        if (cuda_error != cudaSuccess) { \
-            printf("CALL FAILED: CUDA API returned error = %d, details: " #msg "\n", cuda_error); \
-            CUDSS_EXAMPLE_FREE; \
-            return -1; \
-        } \
-    } while(0);
 
-
-#define CUDSS_CALL_AND_CHECK(call, status, msg) \
-    do { \
-        status = call; \
-        if (status != CUDSS_STATUS_SUCCESS) { \
-            printf("CALL FAILED: CUDSS call ended unsuccessfully with status = %d, details: " #msg "\n", status); \
-            CUDSS_EXAMPLE_FREE; \
-            return -2; \
-        } \
-    } while(0);
 
 #define CUDSS_EXAMPLE_FREE \
     do { \
@@ -477,6 +522,8 @@ int FluidSolver2D::pressureSolve() {
     cudssStatus_t status = CUDSS_STATUS_SUCCESS;
 
     int n = fluidCellsAmount;
+    std::cout << "n = " << n<< std::endl;
+
     int nnz = csr_values.size();
     int nrhs = 1;
 
@@ -487,10 +534,15 @@ int FluidSolver2D::pressureSolve() {
         return -1;
     }
 
-    int *csr_offsets_d = NULL;
-    int *csr_columns_d = NULL;
-    float *csr_values_d = NULL;
-    float *x_values_d = NULL, *b_values_d = NULL;
+    int *csr_offsets_d;
+    int *csr_columns_d;
+    float *csr_values_d;
+    float *x_values_d, *b_values_d;
+
+    cudaDeviceSynchronize();
+    cudaError err = cudaGetLastError();
+    std::cout << cudaGetErrorString(err) << std::endl;
+
 
     /* Allocate device memory for A, x and b */
     CUDA_CALL_AND_CHECK(cudaMalloc(&csr_offsets_d, (n + 1) * sizeof(int)),
@@ -584,21 +636,20 @@ int FluidSolver2D::pressureSolve() {
 //    }
 
     /* Release the data allocated on the user side */
-
-    for(int i = 0; i < gridWidth; ++i){
-        for(int j = 0; j < gridHeight; ++j){
-            int newFluidInd = fluidNumbers[i*gridHeight + j];
+    for(int j = 0; j < gridHeight; ++j){
+        for(int i = 0; i < gridWidth; ++i){
+            int newFluidInd = fluidNumbers[i+ j*gridWidth];
             if(newFluidInd != -1){
-                p[i*gridHeight + j] = x_values_h[newFluidInd];
+                p[i + j*gridWidth] = x_values_h[newFluidInd];
             }
         }
     }
 
     CUDSS_EXAMPLE_FREE;
-
-    if(status !=CUDSS_STATUS_SUCCESS ){
-        printf("PRESSURE SOLVE FAILED\n");
-    }
+    //std::cout << "pressure solve end" << std::endl;
+//    if(status !=CUDSS_STATUS_SUCCESS ){
+//        printf("PRESSURE SOLVE FAILED\n");
+//    }
 //    if (status == CUDSS_STATUS_SUCCESS && passed)
 //        printf("PRESSURE SOLVE PASSED\n");
 //    else
@@ -610,19 +661,19 @@ int FluidSolver2D::pressureSolve() {
 
 void FluidSolver2D::applyPressure() {
     float scale = dt / (FLUID_DENSITY * dx);
+    for (int j = 0; j < gridHeight; ++j) {
     for (int i = 0; i < gridWidth; ++i) {
-        for (int j = 0; j < gridHeight; ++j) {
             // update u
             if (i - 1 >= 0) {
-                if (labels[(i - 1)*gridHeight + j] == Utility::FLUID || labels[i*gridHeight +j] == Utility::FLUID) {
-                    if (labels[(i - 1)*gridHeight + j] == Utility::SOLID ||  labels[i*gridHeight +j] == Utility::SOLID) {
+                if (labels[(i - 1) + j*gridWidth] == Utility::FLUID || labels[i +j*gridWidth] == Utility::FLUID) {
+                    if (labels[(i - 1) + j*gridWidth] == Utility::SOLID ||  labels[i +j*gridWidth] == Utility::SOLID) {
                         // TODO add solid velocities
-                        u[i*gridHeight + j] = 0.0f; // usolid[i][j]
+                        u[i + j*gridWidth] = 0.0f; // usolid[i][j]
                     } else {
-                        u[i*gridHeight + j] -= scale * (p[i*gridHeight + j] - p[(i - 1)*gridHeight+j]);
+                        u[i + j*gridWidth] -= scale * (p[i + j*gridWidth] - p[(i - 1)+j*gridWidth]);
                     }
                 } else {
-                    u[i*gridHeight + j] = VEL_UNKNOWN;
+                    u[i + j*gridWidth] = VEL_UNKNOWN;
                 }
             } else {
                 // edge of grid, keep the same velocity
@@ -630,16 +681,16 @@ void FluidSolver2D::applyPressure() {
 
             // update v
             if (j - 1 >= 0) {
-                if (labels[i * gridHeight + (j - 1)] == Utility::FLUID || labels[i*gridHeight +j] == Utility::FLUID) {
-                    if (labels[i * gridHeight + (j - 1)] == Utility::SOLID || labels[i*gridHeight +j] == Utility::SOLID) {
+                if (labels[i + (j - 1)*gridWidth] == Utility::FLUID || labels[i +j*gridWidth] == Utility::FLUID) {
+                    if (labels[i + (j - 1)*gridWidth] == Utility::SOLID || labels[i +j*gridWidth] == Utility::SOLID) {
                         // TODO add solid velocities
-                        v[i*gridHeight +j] = 0.0f; // vsolid[i][j]
+                        v[i +j*gridWidth] = 0.0f; // vsolid[i][j]
                     }
                     else {
-                        v[i*gridHeight +j] -= scale * (p[i*gridHeight +j] - p[i * gridHeight + (j - 1)]);
+                        v[i +j*gridWidth] -= scale * (p[i +j*gridWidth] - p[i  + (j - 1)*gridWidth]);
                     }
                 } else {
-                    v[i*gridHeight +j] = VEL_UNKNOWN;
+                    v[i +j*gridWidth] = VEL_UNKNOWN;
                 }
             } else {
                 // edge of grid, keep the same velocity
@@ -672,10 +723,10 @@ float2 FluidSolver2D::interpVel(std::vector<float>& uGrid, std::vector<float>& v
         float y1 = cellLoc.y - offset;
         float y2 = cellLoc.y + offset;
         // get actual values at these positions
-        float u1 = uGrid[i*gridHeight + j];
-        float u2 = uGrid[(i + 1)*gridHeight+j];
-        float v1 = vGrid[i*gridHeight + j];
-        float v2 = vGrid[i*gridHeight+(j + 1)];
+        float u1 = uGrid[i+ j*gridWidth];
+        float u2 = uGrid[(i + 1)+j*gridWidth];
+        float v1 = vGrid[i+ j*gridWidth];
+        float v2 = vGrid[i+(j + 1)*gridWidth];
 
         // the interpolated values
         float u = ((x2 - pos.x) / (x2 - x1)) * u1 + ((pos.x - x1) / (x2 - x1)) * u2;
@@ -690,15 +741,17 @@ void FluidSolver2D::gridToParticles(float alpha) {
     std::vector<float> duGrid((gridWidth+1)*gridHeight, 0.0f);
     std::vector<float> dvGrid((gridWidth)*(gridHeight+1), 0.0f);
     // calc u grid
+    for (int j = 0; j < gridHeight; j++) {
     for (int i = 0; i < gridWidth + 1; i++) {
-        for (int j = 0; j < gridHeight; j++) {
-            duGrid[i*gridHeight + j] = u[i*gridHeight + j] - uSaved[i*gridHeight + j];
+
+            duGrid[i + j*gridWidth] = u[i + j*gridWidth] - uSaved[i + j*gridWidth];
         }
     }
     // calc v grid
+    for (int j = 0; j < gridHeight + 1; j++) {
     for (int i = 0; i < gridWidth; i++) {
-        for (int j = 0; j < gridHeight + 1; j++) {
-            dvGrid[i*gridHeight + j] = v[i*gridHeight + j] - vSaved[i*gridHeight + j];
+
+            dvGrid[i + j*gridWidth] = v[i+ j*gridWidth] - vSaved[i+ j*gridWidth];
         }
     }
 
@@ -752,7 +805,7 @@ std::vector<int> FluidSolver2D::checkNeighbors(std::vector<int> grid, int2 dim, 
 
         // make sure valid indices
         if ((neighborX >= 0 && neighborX < dim.x) && (neighborY >= 0 && neighborY < dim.y)) {
-            if (grid[neighborX * gridHeight + neighborY] == value) {
+            if (grid[neighborX  + neighborY*gridWidth] == value) {
                 neighborsTrue.push_back(i);
             }
         }
@@ -878,7 +931,7 @@ void FluidSolver2D::advectParticles(int C) {
             int2 cell = Utility::getGridCellIndex(curParticle->pos, dx);
             int j = cell.x;
             int k = cell.y;
-            if (labels[j*gridHeight + k] == Utility::SOLID) {
+            if (labels[j+ k*gridWidth] == Utility::SOLID) {
                 //std::cout << "Advected into SOLID, projecting back!\n";
                 if (!projectParticle(curParticle, dx / 4.0f)) {
                     //std::cout << "RK3 error...skipping particle" << std::endl;
@@ -907,7 +960,7 @@ void FluidSolver2D::cleanUpParticles(float delta) {
             if (i >= particles->size()) {
                 finished = true;
             }
-        } else if (labels[ind[0]*gridHeight + ind[1]] == Utility::SOLID) {
+        } else if (labels[ind[0] + ind[1]*gridWidth] == Utility::SOLID) {
             // project back into fluid
             bool success = projectParticle(&(particles->at(i)), dx);
             if (!success) {
@@ -974,17 +1027,17 @@ bool FluidSolver2D::isFluid(int i, int j) {
             isFluid = false;
         }
         else if (i == gridWidth) {
-            if (labels[(i - 1)*gridHeight + j] == Utility::FLUID) {
+            if (labels[(i - 1) + j*gridWidth] == Utility::FLUID) {
                 isFluid = true;
             }
         }
         else if (j == gridHeight) {
-            if (labels[i*gridHeight + (j - 1)] == Utility::FLUID) {
+            if (labels[i + (j - 1)*gridWidth] == Utility::FLUID) {
                 isFluid = true;
             }
         }
     }
-    else if (labels[i*gridHeight + j] == Utility::FLUID) {
+    else if (labels[i + j*gridWidth] == Utility::FLUID) {
         isFluid = true;
     }
 

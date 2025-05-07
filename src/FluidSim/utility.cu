@@ -76,8 +76,8 @@ namespace Utility {
         return make_int2((int)(pos.x / dx), (int)(pos.y/dx));
     }
 
-    __device__ int getGridCellIndex_device(float2 pos, float dx, int gridHeight){
-        return (int)(pos.x / dx) * gridHeight + (int)(pos.y / dx);
+    __device__ int getGridCellIndex_device(float2 pos, float dx, int gridWidth){
+        return (int)(pos.x / dx)  + (int)(pos.y / dx) * gridWidth;
     }
 
 
@@ -98,12 +98,12 @@ namespace Utility {
         }
     }
 
-    __device__ int2 getGridIndicesU(int ind, int gridHeight) {
-        return {ind / gridHeight, ind % gridHeight}; // i, j для u-компоненты
+    __device__ int2 getGridIndicesU(int ind, int gridWidth) {
+        return {ind % (gridWidth+1), ind / (gridWidth+1)}; // i, j для u-компоненты
     }
 
-    __device__ int2 getGridIndicesV(int ind, int gridHeight) {
-        return {ind / (gridHeight + 1), ind % (gridHeight + 1)}; // i, j для v-компоненты
+    __device__ int2 getGridIndicesV(int ind, int gridWidth) {
+        return {ind % (gridWidth), ind / (gridWidth)}; // i, j для v-компоненты
     }
 
 

@@ -8,7 +8,7 @@
 
 __global__ void labelCellWrap(int* labels, Utility::Particle2D* particles, float dx, int gridHeight);
 __device__ void labelCellFluid(int ind, int* labels, Utility::Particle2D* particles, float dx, int gridHeight);
-__device__ void labelCellClean(int ind, int* labels);
+__device__ void labelCellClean(int ind, int* labels, Utility::Particle2D* particles, float dx, int gridWidth);
 __global__ void accumulateDenAndNum( Utility::Particle2D particle, float* uNum, float* uDen, float* vNum, float* vDen, int uSize, int vSize, int gridWidth, int gridHeight, float dx);
 __global__ void applyNumDen(float* u_device, float* v_device, float* uNum, float* uDen, float* vNum, float* vDen, int uSize, int vSize, int gridWidth, int gridHeight);
 
@@ -75,7 +75,7 @@ private:
     // FUNCTIONS
     // solver steps
     void seedParticles(int particlesPerCell, std::vector<Utility::Particle2D>* particleList);
-    void labelGrid();
+    int labelGrid();
     void frameStep();
     void particlesToGrid();
     void saveVelocities();

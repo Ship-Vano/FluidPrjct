@@ -56,7 +56,7 @@ namespace Utility {
                             const std::string& filename);
 
 
-    __device__ int getGridCellIndex_device(float2 pos, float dx, int gridHeight);
+    __device__ int getGridCellIndex_device(float2 pos, float dx, int gridWidth);
 
     __device__ float2 getGridCellPosition_device(float i, float j, float dx);
 
@@ -64,9 +64,9 @@ namespace Utility {
 
     __device__ float hatFunction(float r);
 
-    __device__ int2 getGridIndicesU(int ind, int gridHeight);
+    __device__ int2 getGridIndicesU(int ind, int gridWidth);
 
-    __device__ int2 getGridIndicesV(int ind, int gridHeight);
+    __device__ int2 getGridIndicesV(int ind, int gridWidth);
 
 
     // matrixes and solvers
