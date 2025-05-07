@@ -522,7 +522,7 @@ int FluidSolver2D::pressureSolve() {
     cudssStatus_t status = CUDSS_STATUS_SUCCESS;
 
     int n = fluidCellsAmount;
-    std::cout << "n = " << n<< std::endl;
+    //std::cout << "n = " << n<< std::endl;
 
     int nnz = csr_values.size();
     int nrhs = 1;
@@ -540,8 +540,8 @@ int FluidSolver2D::pressureSolve() {
     float *x_values_d, *b_values_d;
 
     cudaDeviceSynchronize();
-    cudaError err = cudaGetLastError();
-    std::cout << cudaGetErrorString(err) << std::endl;
+    //cudaError err = cudaGetLastError();
+    //std::cout << cudaGetErrorString(err) << std::endl;
 
 
     /* Allocate device memory for A, x and b */
@@ -1050,6 +1050,7 @@ void FluidSolver2D::run(int max_steps) {
         frameStep();
         if(i%10 == 0){
             Utility::saveParticlesToPLY(*particles, "InputData/particles_" + std::to_string(i) + ".ply");
+            std::cout << "frame = " << i/10 << std::endl;
         }
 
     }
