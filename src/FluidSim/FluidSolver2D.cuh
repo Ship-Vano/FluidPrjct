@@ -4,13 +4,46 @@
 #include <float.h>
 #include <fstream>
 #include <random>
+#include <cassert>
 
 
 __global__ void labelCellWrap(int* labels, Utility::Particle2D* particles, float dx, int gridHeight);
-__device__ void labelCellFluid(int ind, int* labels, Utility::Particle2D* particles, float dx, int gridHeight);
-__device__ void labelCellClean(int ind, int* labels, Utility::Particle2D* particles, float dx, int gridWidth);
+__global__ void clearLabelsKernel(int* labels, int gridWidth, int gridHeight);
+__global__ void markFluidCellsKernel(const float2* particles, int numParticles,
+                                     float dx, int gridWidth, int gridHeight, int* labels);
 __global__ void accumulateDenAndNum( Utility::Particle2D particle, float* uNum, float* uDen, float* vNum, float* vDen, int uSize, int vSize, int gridWidth, int gridHeight, float dx);
 __global__ void applyNumDen(float* u_device, float* v_device, float* uNum, float* uDen, float* vNum, float* vDen, int uSize, int vSize, int gridWidth, int gridHeight);
+__global__ void interpVelKernel(
+        const float* uGrid,
+        const float* vGrid,
+        const float2* particles,
+        float2* particleVelocities,
+        int numParticles,
+        float dx,
+        int gridWidth,
+        int gridHeight
+);
+__global__ void computeDeltaUGridKernel(
+        const float* u,
+        const float* uSaved,
+        float* duGrid,
+        int gridWidth,
+        int gridHeight
+);
+__global__ void computeDeltaVGridKernel(
+        const float* v,
+        const float* vSaved,
+        float* dvGrid,
+        int gridWidth,
+        int gridHeight
+);
+__global__ void updateParticleVelocitiesKernel(
+        float2* particleVelocities,
+        const float2* duGridInterp,
+        const float2* dvGridInterp,
+        int numParticles,
+        float alpha
+);
 
 class FluidSolver2D{
 private:
@@ -51,7 +84,7 @@ private:
     int fluidCellsAmount;
 
     //Simulation parameters
-    const int VEL_UNKNOWN = INT_MIN;
+
     // number of particles to seed in each cell at start of sim
     const int PARTICLES_PER_CELL = 6;
     // the amount of weight to give to PIC in PIC/FLIP update
@@ -76,6 +109,7 @@ private:
     // solver steps
     void seedParticles(int particlesPerCell, std::vector<Utility::Particle2D>* particleList);
     int labelGrid();
+    int labelGrid_gpu();
     void frameStep();
     void particlesToGrid();
     void saveVelocities();
@@ -83,6 +117,7 @@ private:
     int pressureSolve();
     void applyPressure();
     void gridToParticles(float alpha);
+    void gridToParticles_gpu(float alpha);
     void advectParticles(int C);
     void cleanUpParticles(float delta);
     // helpers

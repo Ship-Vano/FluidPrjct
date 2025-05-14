@@ -11,7 +11,7 @@ int main(){
     //out();
     float dt = 0.01;
     float dx = 0.5;
-    FluidSolver2D solver(512, 512, dx, dt);
+    FluidSolver2D solver(100, 100, dx, dt);
     solver.PIC_WEIGHT = (6 * dt)/(dx*dx);
     std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
     solver.init("InputData/labels_colimn.txt");

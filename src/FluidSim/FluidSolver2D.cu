@@ -44,9 +44,14 @@ FluidSolver2D::~FluidSolver2D(){
 
 //public funcs###############2
 
+/**
+ * ########################## ЭТАП "ПОДГОТОВИТЕЛЬНЫЙ"
+ * ########################################
+ * ########################################
+ * */
 void FluidSolver2D::init(std::string fileName){
     std::ifstream file(fileName);
-
+    assert(file.is_open());
     // Читаем ширину и высоту
     file >> gridWidth >> gridHeight;
     w_x_h = gridWidth * gridHeight;
@@ -153,23 +158,43 @@ void FluidSolver2D::seedParticles(int particlesPerCell, std::vector<Utility::Par
     blocksForParticles = (particles->size() + threadsPerBlock - 1) / threadsPerBlock;
 }
 
-__global__ void labelCellWrap(int* labels, Utility::Particle2D* particles, float dx, int gridWidth){
-    int ind = blockIdx.x * blockDim.x + threadIdx.x;
-    labelCellClean(ind, labels, particles, dx,gridWidth);
-    labelCellFluid(ind, labels, particles, dx,gridWidth);
-}
 
-__device__ void labelCellFluid(int ind, int* labels, Utility::Particle2D* particles, float dx, int gridWidth){
-    int cellInd = Utility::getGridCellIndex_device(particles[ind].pos, dx, gridWidth);
-    labels[cellInd] = Utility::FLUID;
-}
+/**
+ * ########################## ЭТАП "ОПРЕДЕЛЕНИЕ ТИПА ЯЧЕЕК"
+ * ########################################
+ * ########################################
+ * */
 
-__device__ void labelCellClean(int ind, int* labels, Utility::Particle2D* particles, float dx, int gridWidth){
-    int cellInd = Utility::getGridCellIndex_device(particles[ind].pos, dx, gridWidth);
-    if(labels[cellInd] != Utility::SOLID){
-        labels[cellInd] = Utility::AIR;
+// Ядро для очистки сетки
+__global__ void clearLabelsKernel(int* labels, int gridWidth, int gridHeight) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (i < gridWidth && j < gridHeight) {
+        int index = i + j * gridWidth;
+        if (labels[index] != Utility::SOLID) {
+            labels[index] = Utility::AIR;
+        }
     }
 }
+
+
+// Ядро для пометки ячеек с частицами
+__global__ void markFluidCellsKernel(const Utility::Particle2D* particles, int numParticles,
+                                     float dx, int gridWidth, int gridHeight, int* labels) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numParticles) return;
+
+    float2 pos = particles[idx].pos;
+    int2 cell =  make_int2((int)(pos.x / dx), (int)(pos.y/dx));
+
+    // Проверка границ
+    if (cell.x >= 0 && cell.x < gridWidth && cell.y >= 0 && cell.y < gridHeight) {
+        int cellIndex = cell.x + cell.y * gridWidth;
+        atomicCAS(&labels[cellIndex], Utility::AIR, Utility::FLUID); // Атомарное обновление
+    }
+}
+
 
 int FluidSolver2D::labelGrid() {
     // first clear grid labels (mark everything air, but leave solids)
@@ -190,53 +215,48 @@ int FluidSolver2D::labelGrid() {
     return 0;
 }
 
-//int FluidSolver2D::labelGrid() {
-//    int particlesAmount = particles->size();
-//    int blockForParticles = (particlesAmount + threadsPerBlock - 1) / threadsPerBlock;
-//    int* labels_for_device = NULL;
-//    cudaDeviceSynchronize();
-//    Utility::Particle2D* particles_for_device;
-//    cudaError_t err;
-//    std::cout << w_x_h << std::endl;
-//    err = cudaMalloc(&labels_for_device, sizeof(int)*w_x_h);
-//    if(err != cudaSuccess) {
-//        std::cerr << "cudaMalloc labels error: " << cudaGetErrorString(err) << err << std::endl;
-//        return -1;
-//    }
-//    cudaMemcpy(labels_for_device, labels.data(), sizeof(int)*w_x_h, cudaMemcpyHostToDevice);
-//    err = cudaMalloc(&particles_for_device, sizeof(Utility::Particle2D)*particles->size());
-//    if(err != cudaSuccess) {
-//        std::cerr << "cudaMalloc particles error: " << cudaGetErrorString(err) << std::endl;
-//        cudaFree(labels_for_device);
-//        return -1;
-//    }
-//    cudaMemcpy(particles_for_device, particles->data(), sizeof(Utility::Particle2D)*particlesAmount, cudaMemcpyHostToDevice);
-//    labelCellWrap<<<blockForParticles, threadsPerBlock>>>(labels_for_device, particles->data(), dx, gridWidth);
-//    cudaDeviceSynchronize();
-//    cudaMemcpy(labels.data(), labels_for_device, sizeof(int)*w_x_h, cudaMemcpyDeviceToHost);
-//    cudaFree(labels_for_device);
-//    cudaFree(particles_for_device);
-////    //DEBUG COUT
-////    for(int j =0; j < gridHeight; ++j){
-////      for(int i = 0; i < gridWidth; ++i){
-////
-////            int idx = i  + j*gridWidth;
-////            switch (labels[idx]) {
-////                case Utility::SOLID: std::cout<<"S"; break;
-////                case Utility::FLUID: std::cout << "F"; break;
-////                case Utility::AIR: std::cout << "A" ;   break;
-////                default:
-////                    throw std::runtime_error("Unknown cell val");
-////            }
-////        }
-////        std::cout<<std::endl;
-////    }
-////    std::cout<<"--------------\n\n"<<std::endl;
-//    return 0;
-//}
+int FluidSolver2D::labelGrid_gpu() {
+    int* labels_for_device = NULL;
+    cudaDeviceSynchronize();
+    Utility::Particle2D* particles_for_device;
+    cudaError_t err;
+    err = cudaMalloc(&labels_for_device, sizeof(int)*w_x_h);
+    if(err != cudaSuccess) {
+        std::cerr << "cudaMalloc labels error: " << cudaGetErrorString(err) << err << std::endl;
+        return -1;
+    }
+    cudaMemcpy(labels_for_device, labels.data(), sizeof(int)*w_x_h, cudaMemcpyHostToDevice);
+    err = cudaMalloc(&particles_for_device, sizeof(Utility::Particle2D)*particles->size());
+    if(err != cudaSuccess) {
+        std::cerr << "cudaMalloc particles error: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(labels_for_device);
+        return -1;
+    }
+    int numParticles = static_cast<int>(particles->size());
+    cudaMemcpy(particles_for_device, particles->data(), sizeof(Utility::Particle2D)*numParticles, cudaMemcpyHostToDevice);
+    // 1. Очистка сетки
+    dim3 blockDim_loc(16, 16); //16*16 = 256
+    dim3 gridDim_loc((gridWidth + 15) / 16, (gridHeight + 15) / 16);
+    clearLabelsKernel<<<gridDim_loc, blockDim_loc>>>(labels_for_device, gridWidth, gridHeight);
+
+    // 2. Пометка fluid-ячеек
+    int blockSize = 256;
+    int gridSize = (numParticles + blockSize - 1) / blockSize;
+    markFluidCellsKernel<<<gridSize, blockSize>>>(particles_for_device, numParticles,
+                                                  dx, gridWidth, gridHeight, labels_for_device);
+    cudaDeviceSynchronize();
+    cudaMemcpy(labels.data(), labels_for_device, sizeof(int)*w_x_h, cudaMemcpyDeviceToHost);
+    cudaFree(labels_for_device);
+    cudaFree(particles_for_device);
+    return 0;
+}
 
 
-
+/**
+ * ########################## ЭТАП "ЧАСТИЦЫ -> СЕТКА"
+ * ########################################
+ * ########################################
+ * */
 __global__ void accumulateDenAndNum( Utility::Particle2D particle, float* uNum, float* uDen, float* vNum, float* vDen, int uSize, int vSize, int gridWidth, int gridHeight, float dx){
     int ind = blockIdx.x * blockDim.x + threadIdx.x;
     // save check
@@ -334,6 +354,12 @@ void FluidSolver2D::saveVelocities(){
     }
 }
 
+
+/**
+ * ########################## ЭТАП "ВНЕШНИЕ СИЛЫ"
+ * ########################################
+ * ########################################
+ * */
 void FluidSolver2D::applyForces() {
     // traverse all grid cells and apply force to each velocity component
     // The new velocity is calculated using forward euler
@@ -356,6 +382,13 @@ void FluidSolver2D::applyForces() {
     }
 }
 
+
+
+/**
+ * ########################## ЭТАП "ДАВЛЕНИЕ"
+ * ########################################
+ * ########################################
+ * */
 void FluidSolver2D::constructRHS(std::vector<float>& rhs){
     // calculate negative divergence
     //float scale = 1.0f / dx;
@@ -395,10 +428,6 @@ void FluidSolver2D::constructRHS(std::vector<float>& rhs){
 }
 
 /*
-Constructs the A matrix for the system to solve for pressure. This a sparse coefficient matrix
-for the pressure terms, stored in 3 separate grids. If index i, j, k is not a fluid cell, then
-it is 0.0 in all 3 grids that store the matrix.
-Args:
 Adiag - grid to store the diagonal of the matrix in.
 Ax - grid to store the coefficients for pressure in the (i+1) cell for each grid cell with x index i
 Ay - grid to store the coefficients for pressure in the (j+1) cell for each grid cell with y index j
@@ -631,11 +660,6 @@ int FluidSolver2D::pressureSolve() {
     CUDA_CALL_AND_CHECK(cudaMemcpy(x_values_h, x_values_d, nrhs * n * sizeof(float),
                                    cudaMemcpyDeviceToHost), "cudaMemcpy for x_values");
 
-//    int passed = 1;
-//    for (int i = 0; i < n; i++) {
-//        printf("x[%d] = %1.4f r[%d] = %1.4f\n;", i, x_values_h[i], i, rhs[i]);
-//    }
-
     /* Release the data allocated on the user side */
     for(int j = 0; j < gridHeight; ++j){
         for(int i = 0; i < gridWidth; ++i){
@@ -647,14 +671,6 @@ int FluidSolver2D::pressureSolve() {
     }
 
     CUDSS_EXAMPLE_FREE;
-    //std::cout << "pressure solve end" << std::endl;
-//    if(status !=CUDSS_STATUS_SUCCESS ){
-//        printf("PRESSURE SOLVE FAILED\n");
-//    }
-//    if (status == CUDSS_STATUS_SUCCESS && passed)
-//        printf("PRESSURE SOLVE PASSED\n");
-//    else
-//        printf("PRESSURE SOLVE FAILED\n");
 
     return 0;
 
@@ -700,7 +716,14 @@ void FluidSolver2D::applyPressure() {
     }
 }
 
-/*
+
+/**
+ * ########################## ЭТАП "СЕТКА -> ЧАСТИЦЫ"
+ * ########################################
+ * ########################################
+ * */
+
+/* !!!!cpu!!!
 Interpolates the value in the given velocity grid at the given position using bilinear interpolation.
 Returns velocity unkown if position is not on simulation grid.
 Args:
@@ -770,6 +793,175 @@ void FluidSolver2D::gridToParticles(float alpha) {
     }
 
 }
+
+////////GPU-версия
+
+// Ядро для интерполяции скорости
+__global__ void interpVelKernel(
+        const float* uGrid,
+        const float* vGrid,
+        const float2* particles,
+        float2* particleVelocities,
+        int numParticles,
+        float dx,
+        int gridWidth,
+        int gridHeight
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numParticles) return;
+
+    float2 pos = particles[idx];
+    float2 picInterp = make_float2(VEL_UNKNOWN, VEL_UNKNOWN);
+    float2 flipInterp = make_float2(0.0f, 0.0f);
+
+    // Билинейная интерполяция
+    int2 cell = make_int2((int)(pos.x / dx), (int)(pos.y/dx));
+    int i = cell.x;
+    int j = cell.y;
+
+    if (i >= 0 && i < gridWidth && j >= 0 && j < gridHeight) {
+        float2 cellLoc = make_float2((i +0.5f)* dx, (j + 0.5f) * dx);
+        float offset = dx / 2.0f;
+        float x1 = cellLoc.x - offset;
+        float x2 = cellLoc.x + offset;
+        float y1 = cellLoc.y - offset;
+        float y2 = cellLoc.y + offset;
+
+        // Интерполяция u
+        float u1 = uGrid[i + j * (gridWidth + 1)];
+        float u2 = uGrid[(i + 1) + j * (gridWidth + 1)];
+        float u = ((x2 - pos.x) / (x2 - x1)) * u1 + ((pos.x - x1) / (x2 - x1)) * u2;
+
+        // Интерполяция v
+        float v1 = vGrid[i + j * gridWidth];
+        float v2 = vGrid[i + (j + 1) * gridWidth];
+        float v = ((y2 - pos.y) / (y2 - y1)) * v1 + ((pos.y - y1) / (y2 - y1)) * v2;
+
+        picInterp = make_float2(u, v);
+    }
+
+    // Сохраняем результат для частицы
+    particleVelocities[idx] = picInterp;
+}
+
+//вычисление duGrid/dvGrid на gpu
+//duGrid
+__global__ void computeDeltaUGridKernel(
+        const float* u,
+        const float* uSaved,
+        float* duGrid,
+        int gridWidth,
+        int gridHeight
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (i < gridWidth + 1 && j < gridHeight) {
+        int index = i + j * (gridWidth + 1);
+        duGrid[index] = u[index] - uSaved[index];
+    }
+}
+// Аналогично для dvGrid
+__global__ void computeDeltaVGridKernel(
+        const float* v,
+        const float* vSaved,
+        float* dvGrid,
+        int gridWidth,
+        int gridHeight
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (i < gridWidth && j < gridHeight + 1) {
+        int index = i + j * gridWidth;
+        dvGrid[index] = v[index] - vSaved[index];
+    }
+}
+
+__global__ void updateParticleVelocitiesKernel(
+        float2* particleVelocities,
+        const float2* duGridInterp,
+        const float2* dvGridInterp,
+        int numParticles,
+        float alpha
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numParticles) return;
+
+    float2 picInterp = particleVelocities[idx];
+    float2 flipInterp = duGridInterp[idx]; // Предполагаем, что duGridInterp и dvGridInterp уже вычислены
+
+    // Обновление скорости по схеме PIC/FLIP
+    particleVelocities[idx] = picInterp * alpha + (particleVelocities[idx] + flipInterp)*(1.0f-alpha);
+}
+
+//TODO:
+void FluidSolver2D::gridToParticles_gpu(float alpha) {
+//    std::vector<float> duGrid((gridWidth+1)*gridHeight, 0.0f);
+//    std::vector<float> dvGrid((gridWidth)*(gridHeight+1), 0.0f);
+
+    float* duGrid_device;
+    float* dvGrid_device;
+    cudaMalloc(&duGrid_device, (gridWidth + 1) * gridHeight * sizeof(float));
+    cudaMalloc(&dvGrid_device, (gridWidth)*(gridHeight+1) * sizeof(float));
+
+    float* u_device;
+    float* v_device;
+    cudaMalloc(&u_device, (gridWidth + 1) * gridHeight * sizeof(float));
+    cudaMalloc(&v_device, (gridWidth)*(gridHeight+1) * sizeof(float));
+    cudaMemcpy(u_device, u.data(), (gridWidth + 1) * gridHeight * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(v_device, v.data(), gridWidth * (gridHeight+1) * sizeof(float), cudaMemcpyHostToDevice);
+
+    float* uSaved_device;
+    float* vSaved_device;
+    cudaMalloc(&uSaved_device, (gridWidth + 1) * gridHeight * sizeof(float));
+    cudaMalloc(&vSaved_device, (gridWidth)*(gridHeight+1) * sizeof(float));
+    cudaMemcpy(u_device, uSaved.data(), (gridWidth + 1) * gridHeight * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(v_device, vSaved.data(), gridWidth * (gridHeight+1) * sizeof(float), cudaMemcpyHostToDevice);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+    }
+
+    // 1. Вычисление duGrid и dvGrid
+    dim3 blockDim(16, 16);
+    dim3 gridDimDU((gridWidth + 1 + 15) / 16, (gridHeight + 15) / 16);
+    computeDeltaUGridKernel<<<gridDimDU, blockDim>>>(u_device, uSaved_device, duGrid_device, gridWidth, gridHeight);
+
+    dim3 gridDimDV((gridWidth + 15) / 16, (gridHeight + 1 + 15) / 16);
+    computeDeltaVGridKernel<<<gridDimDV, blockDim>>>(v_device, vSaved_device, dvGrid_device, gridWidth, gridHeight);
+
+    // 2. Интерполяция duGrid и dvGrid для частиц (аналогично interpVel)
+    float2* d_duInterp, *d_dvInterp;
+    cudaMalloc(&d_duInterp, particles->size() * sizeof(float2));
+    cudaMalloc(&d_dvInterp, particles->size() * sizeof(float2));
+
+    int numParticles = static_cast<int>(particles->size());
+    int blockSize = 256;
+    int gridSize = (numParticles + blockSize - 1) / blockSize;
+
+    interpVelKernel<<<gridSize, blockSize>>>(
+            duGrid_device, dvGrid_device, d_particles, d_duInterp,
+            numParticles, dx, gridWidth, gridHeight, alpha
+    );
+
+    // 3. Обновление скоростей частиц
+    updateParticleVelocitiesKernel<<<gridSize, blockSize>>>(
+            d_particleVelocities, d_duInterp, d_dvInterp, numParticles, alpha
+    );
+
+    // Освобождение временной памяти
+    cudaFree(d_duInterp);
+    cudaFree(d_dvInterp);
+
+}
+
+/**
+ * ########################## ЭТАП "ПЕРЕДВИЖЕНИЕ ЧАСТИЦ"
+ * ########################################
+ * ########################################
+ * */
 
 /*
 Advects a particle using Runge-Kutta 3 through the given velocity field.
@@ -944,8 +1136,14 @@ void FluidSolver2D::cleanUpParticles(float delta) {
     //std::cout << "Removed " << numDeleted << " particles. Total: " << particles->size() << "\n";
 }
 
+
+/**
+ * ########################## ЭТАП "ОБЩИЙ ЦИКЛ ДЛЯ ОТРИСОВКИ КАДРА"
+ * ########################################
+ * ########################################
+ * */
 void FluidSolver2D::frameStep(){
-    labelGrid();
+    labelGrid_gpu();
 
     //particles velocities to grid
     particlesToGrid();
@@ -967,6 +1165,17 @@ void FluidSolver2D::frameStep(){
 
     //boundary penetration detection (if so --- move back inside)
     cleanUpParticles(dx/2.0f);
+}
+
+void FluidSolver2D::run(int max_steps) {
+    for(int i = 0; i < max_steps; ++i){
+        frameStep();
+        if(i%10 == 0){
+            Utility::saveParticlesToPLY(*particles, "InputData/particles_" + std::to_string(i) + ".ply");
+            std::cout << "frame = " << i/10 << "; numParticles = " << particles->size()<<std::endl;
+        }
+
+    }
 }
 
 /*
@@ -1007,13 +1216,3 @@ bool FluidSolver2D::isFluid(int i, int j) {
 }
 
 
-void FluidSolver2D::run(int max_steps) {
-    for(int i = 0; i < max_steps; ++i){
-        frameStep();
-        if(i%10 == 0){
-            Utility::saveParticlesToPLY(*particles, "InputData/particles_" + std::to_string(i) + ".ply");
-            std::cout << "frame = " << i/10 << "; numParticles = " << particles->size()<<std::endl;
-        }
-
-    }
-}
