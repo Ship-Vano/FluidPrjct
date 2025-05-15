@@ -896,66 +896,66 @@ __global__ void updateParticleVelocitiesKernel(
 }
 
 //TODO:
-void FluidSolver2D::gridToParticles_gpu(float alpha) {
-//    std::vector<float> duGrid((gridWidth+1)*gridHeight, 0.0f);
-//    std::vector<float> dvGrid((gridWidth)*(gridHeight+1), 0.0f);
-
-    float* duGrid_device;
-    float* dvGrid_device;
-    cudaMalloc(&duGrid_device, (gridWidth + 1) * gridHeight * sizeof(float));
-    cudaMalloc(&dvGrid_device, (gridWidth)*(gridHeight+1) * sizeof(float));
-
-    float* u_device;
-    float* v_device;
-    cudaMalloc(&u_device, (gridWidth + 1) * gridHeight * sizeof(float));
-    cudaMalloc(&v_device, (gridWidth)*(gridHeight+1) * sizeof(float));
-    cudaMemcpy(u_device, u.data(), (gridWidth + 1) * gridHeight * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(v_device, v.data(), gridWidth * (gridHeight+1) * sizeof(float), cudaMemcpyHostToDevice);
-
-    float* uSaved_device;
-    float* vSaved_device;
-    cudaMalloc(&uSaved_device, (gridWidth + 1) * gridHeight * sizeof(float));
-    cudaMalloc(&vSaved_device, (gridWidth)*(gridHeight+1) * sizeof(float));
-    cudaMemcpy(u_device, uSaved.data(), (gridWidth + 1) * gridHeight * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(v_device, vSaved.data(), gridWidth * (gridHeight+1) * sizeof(float), cudaMemcpyHostToDevice);
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("CUDA Error: %s\n", cudaGetErrorString(err));
-    }
-
-    // 1. Вычисление duGrid и dvGrid
-    dim3 blockDim(16, 16);
-    dim3 gridDimDU((gridWidth + 1 + 15) / 16, (gridHeight + 15) / 16);
-    computeDeltaUGridKernel<<<gridDimDU, blockDim>>>(u_device, uSaved_device, duGrid_device, gridWidth, gridHeight);
-
-    dim3 gridDimDV((gridWidth + 15) / 16, (gridHeight + 1 + 15) / 16);
-    computeDeltaVGridKernel<<<gridDimDV, blockDim>>>(v_device, vSaved_device, dvGrid_device, gridWidth, gridHeight);
-
-    // 2. Интерполяция duGrid и dvGrid для частиц (аналогично interpVel)
-    float2* d_duInterp, *d_dvInterp;
-    cudaMalloc(&d_duInterp, particles->size() * sizeof(float2));
-    cudaMalloc(&d_dvInterp, particles->size() * sizeof(float2));
-
-    int numParticles = static_cast<int>(particles->size());
-    int blockSize = 256;
-    int gridSize = (numParticles + blockSize - 1) / blockSize;
-
-    interpVelKernel<<<gridSize, blockSize>>>(
-            duGrid_device, dvGrid_device, d_particles, d_duInterp,
-            numParticles, dx, gridWidth, gridHeight, alpha
-    );
-
-    // 3. Обновление скоростей частиц
-    updateParticleVelocitiesKernel<<<gridSize, blockSize>>>(
-            d_particleVelocities, d_duInterp, d_dvInterp, numParticles, alpha
-    );
-
-    // Освобождение временной памяти
-    cudaFree(d_duInterp);
-    cudaFree(d_dvInterp);
-
-}
+//void FluidSolver2D::gridToParticles_gpu(float alpha) {
+////    std::vector<float> duGrid((gridWidth+1)*gridHeight, 0.0f);
+////    std::vector<float> dvGrid((gridWidth)*(gridHeight+1), 0.0f);
+//
+//    float* duGrid_device;
+//    float* dvGrid_device;
+//    cudaMalloc(&duGrid_device, (gridWidth + 1) * gridHeight * sizeof(float));
+//    cudaMalloc(&dvGrid_device, (gridWidth)*(gridHeight+1) * sizeof(float));
+//
+//    float* u_device;
+//    float* v_device;
+//    cudaMalloc(&u_device, (gridWidth + 1) * gridHeight * sizeof(float));
+//    cudaMalloc(&v_device, (gridWidth)*(gridHeight+1) * sizeof(float));
+//    cudaMemcpy(u_device, u.data(), (gridWidth + 1) * gridHeight * sizeof(float), cudaMemcpyHostToDevice);
+//    cudaMemcpy(v_device, v.data(), gridWidth * (gridHeight+1) * sizeof(float), cudaMemcpyHostToDevice);
+//
+//    float* uSaved_device;
+//    float* vSaved_device;
+//    cudaMalloc(&uSaved_device, (gridWidth + 1) * gridHeight * sizeof(float));
+//    cudaMalloc(&vSaved_device, (gridWidth)*(gridHeight+1) * sizeof(float));
+//    cudaMemcpy(u_device, uSaved.data(), (gridWidth + 1) * gridHeight * sizeof(float), cudaMemcpyHostToDevice);
+//    cudaMemcpy(v_device, vSaved.data(), gridWidth * (gridHeight+1) * sizeof(float), cudaMemcpyHostToDevice);
+//
+//    cudaError_t err = cudaGetLastError();
+//    if (err != cudaSuccess) {
+//        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+//    }
+//
+//    // 1. Вычисление duGrid и dvGrid
+//    dim3 blockDim(16, 16);
+//    dim3 gridDimDU((gridWidth + 1 + 15) / 16, (gridHeight + 15) / 16);
+//    computeDeltaUGridKernel<<<gridDimDU, blockDim>>>(u_device, uSaved_device, duGrid_device, gridWidth, gridHeight);
+//
+//    dim3 gridDimDV((gridWidth + 15) / 16, (gridHeight + 1 + 15) / 16);
+//    computeDeltaVGridKernel<<<gridDimDV, blockDim>>>(v_device, vSaved_device, dvGrid_device, gridWidth, gridHeight);
+//
+//    // 2. Интерполяция duGrid и dvGrid для частиц (аналогично interpVel)
+//    float2* d_duInterp, *d_dvInterp;
+//    cudaMalloc(&d_duInterp, particles->size() * sizeof(float2));
+//    cudaMalloc(&d_dvInterp, particles->size() * sizeof(float2));
+//
+//    int numParticles = static_cast<int>(particles->size());
+//    int blockSize = 256;
+//    int gridSize = (numParticles + blockSize - 1) / blockSize;
+//
+//    interpVelKernel<<<gridSize, blockSize>>>(
+//            duGrid_device, dvGrid_device, d_particles, d_duInterp,
+//            numParticles, dx, gridWidth, gridHeight, alpha
+//    );
+//
+//    // 3. Обновление скоростей частиц
+//    updateParticleVelocitiesKernel<<<gridSize, blockSize>>>(
+//            d_particleVelocities, d_duInterp, d_dvInterp, numParticles, alpha
+//    );
+//
+//    // Освобождение временной памяти
+//    cudaFree(d_duInterp);
+//    cudaFree(d_dvInterp);
+//
+//}
 
 /**
  * ########################## ЭТАП "ПЕРЕДВИЖЕНИЕ ЧАСТИЦ"
