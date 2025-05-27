@@ -9,10 +9,10 @@
 int main(){
     //cuDSStest();
     //out();
-    float dt = 0.01;
-    float dx = 0.5;
+    float dt = 0.01f;
+    float dx = 0.5f;
     FluidSolver2D solver(100, 100, dx, dt);
-    solver.PIC_WEIGHT = (6 * dt)/(dx*dx);
+    solver.PIC_WEIGHT = (6.0f * dt)/(dx*dx);
     std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
     solver.init("InputData/labels_colimn.txt");
     solver.run(3000);

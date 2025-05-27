@@ -118,14 +118,16 @@ private:
     void applyPressure();
     void gridToParticles(float alpha);
     void gridToParticles_gpu(float alpha);
-    void advectParticles(int C);
+    void advectParticles(float C);
     void cleanUpParticles(float delta);
+    void extrapolateGridFluidData(std::vector<float>& grid, int x, int y, int depth);
     // helpers
     bool isFluid(int i, int j);
+    bool isCellValid(int x, int y);
     void constructRHS(std::vector<float>& rhs);
     void constructA(std::vector<float>& csr_values, std::vector<int>& csr_columns, std::vector<int>& csr_offsets);
     float2 interpVel(std::vector<float>& uGrid, std::vector<float>& vGrid, float2 pos);
-    bool projectParticle(Utility::Particle2D* particle, float dx);
+    bool projectParticle(Utility::Particle2D* particle, float max_h);
     void RK3(Utility::Particle2D *particle, float2 initVel, float dt, std::vector<float>& uGrid, std::vector<float>& vGrid);
     std::vector<int> checkNeighbors(std::vector<int> grid, int2 dim, int2 index, int neighbors[][2], int numNeighbors, int value);
 

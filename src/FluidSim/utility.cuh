@@ -4,6 +4,13 @@
 #include "device_launch_parameters.h"
 #include <cusparse.h>
 #include "cudss.h"
+#include <thrust/host_vector.h>
+#include <thrust/device_vector.h>
+#include <thrust/generate.h>
+#include <thrust/sort.h>
+#include <thrust/copy.h>
+#include <thrust/random.h>
+
 
 #include <random>
 #include <iostream>
@@ -32,6 +39,7 @@ __device__ float2 operator+(const float2& a, const float2& b);
 __device__ float2 operator-(const float2& a, const float2& b);
 
 __device__ float2 operator*(const float2& a, float b);
+
 
 const int VEL_UNKNOWN = INT_MIN;
 

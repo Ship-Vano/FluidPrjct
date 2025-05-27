@@ -1007,17 +1007,16 @@ std::vector<int> FluidSolver2D::checkNeighbors(std::vector<int> grid, int2 dim, 
     return neighborsTrue;
 }
 
+bool FluidSolver2D::isCellValid(int x, int y){
+    return x >= 0 && x < gridWidth && y >= 0 && y < gridHeight;
+};
 
-bool FluidSolver2D::projectParticle(Utility::Particle2D* particle, float dx){
+bool FluidSolver2D::projectParticle(Utility::Particle2D* particle, float max_h){
     // project back into fluid
     // find neighbors that are fluid
     // define neighbors
     const int neighbors[8][2] = {{-1,1}, {-1,0}, {-1,-1}, {0,1},
                                  {0,-1}, {1,1}, {1,0}, {1,-1}};
-
-    auto isCellValid = [&](int x, int y) {
-        return x >= 0 && x < gridWidth && y >= 0 && y < gridHeight;
-    };
 
     int2 cell = Utility::getGridCellIndex(particle->pos, dx);
     std::vector<float2> valid_positions;
@@ -1026,12 +1025,21 @@ bool FluidSolver2D::projectParticle(Utility::Particle2D* particle, float dx){
     for (const auto& n : neighbors) {
         int x = cell.x + n[0];
         int y = cell.y + n[1];
-        if (isCellValid(x, y) && labels[x + y*gridWidth] != Utility::SOLID) {
+        if (isCellValid(x, y) && labels[x + y*gridWidth] == Utility::SOLID) {
             valid_positions.push_back(Utility::getGridCellPosition(x, y, dx));
         }
     }
 
-    if (valid_positions.empty()) return false;
+    if (valid_positions.empty()){
+        for (const auto& n : neighbors) {
+            int x = cell.x + n[0];
+            int y = cell.y + n[1];
+            if (isCellValid(x, y) && labels[x + y*gridWidth] == Utility::AIR) {
+                valid_positions.push_back(Utility::getGridCellPosition(x, y, dx));
+            }
+        }
+        if (valid_positions.empty()) return false;
+    }
 
     // Выбираем позицию с минимальным расстоянием
     float2 new_pos = particle->pos;
@@ -1044,20 +1052,21 @@ bool FluidSolver2D::projectParticle(Utility::Particle2D* particle, float dx){
         }
     }
 
-    // Смещаем частицу на 10% от расстояния для плавности
-    particle->pos.x += 0.5f * (new_pos.x - particle->pos.x);
-    particle->pos.y += 0.5f * (new_pos.y - particle->pos.y);
+    // Смещаем частицу на smoothCoef от расстояния для плавности
+    const float smoothCoef = 1.0f;
+    particle->pos.x += smoothCoef * (new_pos.x - particle->pos.x);
+    particle->pos.y += smoothCoef * (new_pos.y - particle->pos.y);
 
     return true;
 }
 
 //C - the maximum number of grid cells a particle should move when advected. This helps define substep sizes.
-void FluidSolver2D::advectParticles(int C) {
+void FluidSolver2D::advectParticles(float C) {
     for (int i = 0; i < particles->size(); i++) {
         Utility::Particle2D *curParticle = &(particles->at(i));
         float subTime = 0;
         bool finished = false;
-        //float dT = m_dt / 4.999f;
+
         while (!finished) {
             float2 curVel = interpVel(u, v, curParticle->pos);
 
@@ -1137,6 +1146,96 @@ void FluidSolver2D::cleanUpParticles(float delta) {
 }
 
 
+void FluidSolver2D::extrapolateGridFluidData(std::vector<float>& grid, int x, int y, int depth){
+    // marker array
+    std::vector<int> d(x*y, 0);
+
+    // 0 для известных величин, int_max для неизвестных
+    for(int i = 0; i < x; ++i){
+        for(int j = 0; j < y; ++j){
+            if(grid[i + j * x] != VEL_UNKNOWN){
+                d[i + j * x] = 0;
+            }else{
+                d[i + j * x] = INT_MAX;
+            }
+        }
+    }
+
+    //определяем всевозможных 2д-соседей
+    int numNeighbours = 8;
+    int neighbours[8][2] = {
+            {-1, 1}, // top left
+            {-1, 0}, // middle left
+            {-1, -1}, // bottom left
+            {0, 1}, // top middle
+            {0, -1}, // bottom middle
+            {1, 1}, // top right
+            {1, 0}, // middle right
+            {1, -1} // bottom right
+    };
+
+    // инициализируем первый фронт волны
+    std::vector<int2> W;
+    int2 dim{ x, y };
+    for (int i = 0; i < x; i++) {
+        for (int j = 0; j < y; j++) {
+            // текущее значение неизвестно
+            if (d[i + j*x] != 0) {
+                int2 ind{ i, j };
+                if (!checkNeighbors(d, dim, ind, neighbours, numNeighbours, 0).empty()) {
+                    // соседа знаем
+                    d[i + j*x] = 1;
+                    W.push_back(make_int2(i, j));
+                }
+            }
+        }
+    }
+
+    //все фронты, по которым хотим пройтись
+    std::vector<std::vector<int2>> wavefronts;
+    wavefronts.push_back(W);
+    int curWave = 0;
+    while(curWave < depth){
+        //получаем текущий фронт
+        std::vector<int2> curW = wavefronts.at(curWave);
+        //определяем следующий
+        std::vector<int2> nextW;
+        //проходимся по текущему фронту и экстраполируем значения
+        for(int i = 0; i < curW.size(); ++i){
+            int2 ind = curW.at(i);
+            //среднее по соседям
+            float avg = 0.0f;
+            int numUsed = 0;
+            for(int j = 0; j < numNeighbours; ++j){
+                int offsetX = neighbours[j][0];
+                int offsetY = neighbours[j][1];
+                int neighborX = ind.x + offsetX;
+                int neighborY = ind.y + offsetY;
+
+                //проверяем индексы на выход за пределы
+                if ((neighborX >= 0 && neighborX < dim.x) && (neighborY >= 0 && neighborY < dim.y)) {
+                    // добавляем только в том случае, если маркер соседа меньше, чем текущий
+                    if (d[neighborX + neighborY * x] < d[ind.x + ind.y*x]) {
+                        avg += grid[neighborX + neighborY*x];
+                        numUsed++;
+                    } else if (d[neighborX + neighborY*x] == INT_MAX) {
+                        d[neighborX + neighborY*x] = d[ind.x + ind.y*x] + 1;
+                        nextW.push_back(make_int2(neighborX, neighborY));
+                    }
+                }
+            }
+            avg /= numUsed;
+            //задаём текущее значение как среднее по соседям
+            grid[ind.x + ind.y * x] = avg;
+        }
+
+        //следующий фронт закидываем ко всем предыдущим
+        wavefronts.push_back(nextW);
+        curWave++;
+    }
+
+}
+
 /**
  * ########################## ЭТАП "ОБЩИЙ ЦИКЛ ДЛЯ ОТРИСОВКИ КАДРА"
  * ########################################
@@ -1147,6 +1246,10 @@ void FluidSolver2D::frameStep(){
 
     //particles velocities to grid
     particlesToGrid();
+
+    // экстраполяция в пределах +одна ячейка (для аккуратной очистки дивергенции)
+    extrapolateGridFluidData(u, gridWidth + 1, gridHeight, 2);
+    extrapolateGridFluidData(v, gridWidth, gridHeight + 1, 2);
 
     //saving a copy of the current grid velocities (for FLIP)
     saveVelocities();
@@ -1161,6 +1264,8 @@ void FluidSolver2D::frameStep(){
     gridToParticles(PIC_WEIGHT);
 
     //advection of particles
+    extrapolateGridFluidData(u, gridWidth + 1, gridHeight, gridWidth);
+    extrapolateGridFluidData(v, gridWidth, gridHeight + 1, gridHeight);
     advectParticles(ADVECT_MAX);
 
     //boundary penetration detection (if so --- move back inside)
