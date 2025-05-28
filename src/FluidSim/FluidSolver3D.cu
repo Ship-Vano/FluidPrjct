@@ -34,6 +34,18 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
     v.resize(gridWidth, gridHeight+1, gridDepth);
     w.resize(gridWidth, gridHeight, gridDepth+1);
 
+    uSaved.resize(gridWidth+1, gridHeight, gridDepth);
+    vSaved.resize(gridWidth, gridHeight+1, gridDepth);
+    wSaved.resize(gridWidth, gridHeight, gridDepth+1);
+
+    thrust::fill(u.device_data.begin(), u.device_data.end(), 0.0f);
+    thrust::fill(v.device_data.begin(), v.device_data.end(), 0.0f);
+    thrust::fill(w.device_data.begin(), w.device_data.end(), 0.0f);
+
+    thrust::fill(uSaved.device_data.begin(), uSaved.device_data.end(), 0.0f);
+    thrust::fill(vSaved.device_data.begin(), vSaved.device_data.end(), 0.0f);
+    thrust::fill(wSaved.device_data.begin(), wSaved.device_data.end(), 0.0f);
+
     // Конфигурация блоков и потоков
     blockSize3D = dim3(8, 8, 8); // 512 потоков в блоке
     threadsPerBlock1D = 256;      // Для обработки частиц
@@ -172,12 +184,12 @@ __host__ int FluidSolver3D::labelGrid() {
                       labels.device_ptr(),
                       labels.device_ptr() + labels.size(),
                       labels.device_ptr(),
-                      Utility::ClearLabelsFunctor());
+                      ClearLabelsFunctor());
 
     // 2. Пометка ячеек с частицами
     const int numParticles = d_particles.size();
     if (numParticles > 0) {
-        Utility::MarkFluidCellsFunctor functor(
+        MarkFluidCellsFunctor functor(
                 thrust::raw_pointer_cast(d_particles.data()),
                 dx,
                 labels.width(),
@@ -202,18 +214,214 @@ __host__ int FluidSolver3D::labelGrid() {
     return 0;
 }
 
+void FluidSolver3D::saveVelocities() {
+    thrust::copy(thrust::device,
+                 u.device_data.begin(), u.device_data.end(),
+                 uSaved.device_data.begin());
+
+    thrust::copy(thrust::device,
+                 v.device_data.begin(), v.device_data.end(),
+                 vSaved.device_data.begin());
+
+    thrust::copy(thrust::device,
+                 w.device_data.begin(), w.device_data.end(),
+                 wSaved.device_data.begin());
+}
+
+// Структура для хранения временных данных (числители и знаменатели в p2g)
+struct VelocityAccumulators {
+    thrust::device_vector<float> uNum, uDen;
+    thrust::device_vector<float> vNum, vDen;
+    thrust::device_vector<float> wNum, wDen;
+
+    VelocityAccumulators(int uSize, int vSize, int wSize) :
+            uNum(uSize), uDen(uSize),
+            vNum(vSize), vDen(vSize),
+            wNum(wSize), wDen(wSize)
+    {
+        thrust::fill(uNum.begin(), uNum.end(), 0.0f);
+        thrust::fill(uDen.begin(), uDen.end(), 0.0f);
+        thrust::fill(vNum.begin(), vNum.end(), 0.0f);
+        thrust::fill(vDen.begin(), vDen.end(), 0.0f);
+        thrust::fill(wNum.begin(), wNum.end(), 0.0f);
+        thrust::fill(wDen.begin(), wDen.end(), 0.0f);
+    }
+};
+
+// Функтор для накопления скоростей
+struct AccumulateVelocities {
+    float dx;
+    int gridWidth, gridHeight, gridDepth;
+    int uStride, vStride, wStride;
+    const Utility::Particle3D* particles;
+
+    // Указатели на временные данные
+    float* uNum, *uDen;
+    float* vNum, *vDen;
+    float* wNum, *wDen;
+
+    __device__
+    void operator()(int pidx) const {
+        Utility::Particle3D p = particles[pidx];
+        float3 pos = p.pos;
+        float3 vel = p.vel;
+
+        // Для u-компоненты (грани по X)
+        for (int j_offset = 0; j_offset < 2; j_offset++) {
+            for (int k_offset = 0; k_offset < 2; k_offset++) {
+                int i = static_cast<int>(pos.x / dx);
+                int j = static_cast<int>((pos.y - 0.5f * dx) / dx) + j_offset;
+                int k = static_cast<int>((pos.z - 0.5f * dx) / dx) + k_offset;
+
+                if (i >= 0 && i <= gridWidth &&
+                    j >= 0 && j < gridHeight &&
+                    k >= 0 && k < gridDepth) {
+
+                    float3 node_pos = make_float3(i * dx, (j + 0.5f) * dx, (k + 0.5f) * dx);
+                    float weight = computeWeight(pos, node_pos, dx);
+
+                    int index = i + j * (gridWidth + 1) + k * (gridWidth + 1) * gridHeight;
+                    atomicAdd(&uNum[index], vel.x * weight);
+                    atomicAdd(&uDen[index], weight);
+                }
+            }}
+
+        // Для v-компоненты (грани по Y)
+        for (int i_offset = 0; i_offset < 2; i_offset++) {
+            for (int k_offset = 0; k_offset < 2; k_offset++) {
+                int i = static_cast<int>((pos.x - 0.5f * dx) / dx) + i_offset;
+                int j = static_cast<int>(pos.y / dx);
+                int k = static_cast<int>((pos.z - 0.5f * dx) / dx) + k_offset;
+
+                if (i >= 0 && i < gridWidth &&
+                    j >= 0 && j <= gridHeight &&
+                    k >= 0 && k < gridDepth) {
+
+                    float3 node_pos = make_float3((i + 0.5f) * dx, j * dx, (k + 0.5f) * dx);
+                    float weight = computeWeight(pos, node_pos, dx);
+                    int index = i + j * gridWidth + k * vStride;
+                    atomicAdd(&vNum[index], vel.y * weight);
+                    atomicAdd(&vDen[index], weight);
+                }
+            }}
+
+        // Для w-компоненты (грани по Z)
+        for (int i_offset = 0; i_offset < 2; i_offset++) {
+            for (int j_offset = 0; j_offset < 2; j_offset++) {
+                int i = static_cast<int>((pos.x - 0.5f * dx) / dx) + i_offset;
+                int j = static_cast<int>((pos.y - 0.5f * dx) / dx) + j_offset;
+                int k = static_cast<int>(pos.z / dx);
+
+                if (i >= 0 && i < gridWidth &&
+                    j >= 0 && j < gridHeight &&
+                    k >= 0 && k <= gridDepth) {
+
+                    float3 node_pos = make_float3((i + 0.5f) * dx, (j + 0.5f) * dx, k * dx);
+                    float weight = computeWeight(pos, node_pos, dx);
+                    int index = i + j * gridWidth + k * wStride;
+                    atomicAdd(&wNum[index], vel.z * weight);
+                    atomicAdd(&wDen[index], weight);
+                }
+            }}
+    }
+    __device__
+    float computeWeight(float3 p_pos, float3 node_pos, float dx) const {
+        float3 dist = make_float3(p_pos.x - node_pos.x,
+                                  p_pos.y - node_pos.y,
+                                  p_pos.z - node_pos.z);
+        float wx = fmaxf(0.0f, 1.0f - fabsf(dist.x / dx));
+        float wy = fmaxf(0.0f, 1.0f - fabsf(dist.y / dx));
+        float wz = fmaxf(0.0f, 1.0f - fabsf(dist.z / dx));
+        return wx * wy * wz;
+    }
+};
+
+//функтор для вычисления скорости (делим собранные num на den)
+struct ComputeVelocityFunc {
+    __device__
+    float operator()(const thrust::tuple<float, float>& t) const {
+        float num = thrust::get<0>(t);
+        float den = thrust::get<1>(t);
+        return (den > 1e-8f) ? num / den : 0.0f;
+    }
+};
+
+void FluidSolver3D::particlesToGrid() {
+    // Размеры компонент скорости
+    const int uSize = (gridWidth + 1) * gridHeight * gridDepth;
+    const int vSize = gridWidth * (gridHeight + 1) * gridDepth;
+    const int wSize = gridWidth * gridHeight * (gridDepth + 1);
+
+    // Инициализация временных аккумуляторов
+    VelocityAccumulators accum(uSize, vSize, wSize);
+
+    // Создание функтора для накопления
+    AccumulateVelocities accFunc;
+    accFunc.dx = dx;
+    accFunc.gridWidth = gridWidth;
+    accFunc.gridHeight = gridHeight;
+    accFunc.gridDepth = gridDepth;
+    accFunc.uStride = (gridWidth + 1) * gridHeight;
+    accFunc.vStride = gridWidth * (gridHeight + 1);
+    accFunc.wStride = gridWidth * gridHeight;
+    accFunc.particles = thrust::raw_pointer_cast(d_particles.data());
+    accFunc.uNum = thrust::raw_pointer_cast(accum.uNum.data());
+    accFunc.uDen = thrust::raw_pointer_cast(accum.uDen.data());
+    accFunc.vNum = thrust::raw_pointer_cast(accum.vNum.data());
+    accFunc.vDen = thrust::raw_pointer_cast(accum.vDen.data());
+    accFunc.wNum = thrust::raw_pointer_cast(accum.wNum.data());
+    accFunc.wDen = thrust::raw_pointer_cast(accum.wDen.data());
+
+    // Запуск накопления через Thrust
+    thrust::for_each(
+            thrust::device,
+            thrust::counting_iterator<int>(0),
+            thrust::counting_iterator<int>(d_particles.size()),
+            accFunc
+    );
+
+    // Для u-компоненты
+    thrust::transform(
+            thrust::device,
+            thrust::make_zip_iterator(thrust::make_tuple(accum.uNum.begin(), accum.uDen.begin())),
+            thrust::make_zip_iterator(thrust::make_tuple(accum.uNum.end(), accum.uDen.end())),
+            u.device_data.begin(),
+            ComputeVelocityFunc()
+    );
+
+// Для v-компоненты
+    thrust::transform(
+            thrust::device,
+            thrust::make_zip_iterator(thrust::make_tuple(accum.vNum.begin(), accum.vDen.begin())),
+            thrust::make_zip_iterator(thrust::make_tuple(accum.vNum.end(), accum.vDen.end())),
+            v.device_data.begin(),
+            ComputeVelocityFunc()
+    );
+
+// Для w-компоненты
+    thrust::transform(
+            thrust::device,
+            thrust::make_zip_iterator(thrust::make_tuple(accum.wNum.begin(), accum.wDen.begin())),
+            thrust::make_zip_iterator(thrust::make_tuple(accum.wNum.end(), accum.wDen.end())),
+            w.device_data.begin(),
+            ComputeVelocityFunc()
+    );
+}
+
 __host__ void FluidSolver3D::frameStep(){
     labelGrid();
 
-    /* //particles velocities to grid
+    //particles velocities to grid
     particlesToGrid();
 
+    //saving a copy of the current grid velocities (for FLIP)
+    saveVelocities();
+
+/*
     // экстраполяция в пределах +одна ячейка (для аккуратной очистки дивергенции)
     extrapolateGridFluidData(u, gridWidth + 1, gridHeight, 2);
     extrapolateGridFluidData(v, gridWidth, gridHeight + 1, 2);
 
-    //saving a copy of the current grid velocities (for FLIP)
-    saveVelocities();
 
     //applying body forces on grid (e.g. gravity force)
     applyForces();

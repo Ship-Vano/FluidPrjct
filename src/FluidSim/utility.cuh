@@ -1,6 +1,6 @@
 #ifndef UTILITY_H
 #define UTILITY_H
-#include "cuda_runtime.h"
+#include <cuda_runtime.h>
 #include "device_launch_parameters.h"
 #include <cusparse.h>
 #include "cudss.h"
@@ -14,6 +14,8 @@
 #include <thrust/execution_policy.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/functional.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/for_each.h>
 
 
 #include <random>
@@ -24,7 +26,6 @@
 #include <array>
 #include <string>
 #include <iomanip>
-#include <stdio.h>
 
 __device__ float3 operator+(const float3& a, const float3& b);
 
@@ -141,47 +142,51 @@ namespace Utility {
         }
     };
 
-    //////ФУНКТОРЫ ДЛЯ THRUST ОПЕРАЦИЙ
 
-    // Функтор для очистки меток
-    struct ClearLabelsFunctor {
-        __host__ __device__
-        int operator()(int label) const {
-            return (label == Utility::SOLID) ? Utility::SOLID : Utility::AIR;
-        }
-    };
 
-    // Функтор для пометки ячеек с частицами
-    class MarkFluidCellsFunctor {
-    private:
-        const Utility::Particle3D* particles;
-        float dx;
-        int gridWidth, gridHeight, gridDepth;
-        int* labels;
 
-    public:
-        MarkFluidCellsFunctor(const Utility::Particle3D* p, float dx,
-                              int w, int h, int d, int* l)
-                : particles(p), dx(dx), gridWidth(w), gridHeight(h), gridDepth(d), labels(l) {}
 
-        __host__ __device__
-        void operator()(int particle_idx) const {
-            float3 pos = particles[particle_idx].pos;
-            int3 cell = make_int3(pos.x / dx, pos.y / dx, pos.z / dx);
+}
 
-            if (cell.x >= 0 && cell.x < gridWidth &&
-                cell.y >= 0 && cell.y < gridHeight &&
-                cell.z >= 0 && cell.z < gridDepth) {
+//////ФУНКТОРЫ ДЛЯ THRUST ОПЕРАЦИЙ
 
-                int idx = cell.x + cell.y * gridWidth + cell.z * (gridWidth * gridHeight);
+// Функтор для очистки меток
+struct ClearLabelsFunctor {
+    __host__ __device__
+    int operator()(int label) const {
+        return (label == Utility::SOLID) ? Utility::SOLID : Utility::AIR;
+    }
+};
+
+// Функтор для пометки ячеек с частицами
+class MarkFluidCellsFunctor {
+private:
+    const Utility::Particle3D* particles;
+    float dx;
+    int gridWidth, gridHeight, gridDepth;
+    int* labels;
+
+public:
+    MarkFluidCellsFunctor(const Utility::Particle3D* p, float dx,
+                          int w, int h, int d, int* l)
+            : particles(p), dx(dx), gridWidth(w), gridHeight(h), gridDepth(d), labels(l) {}
+
+    __host__ __device__
+    void operator()(int particle_idx) const {
+        float3 pos = particles[particle_idx].pos;
+        int3 cell = make_int3(pos.x / dx, pos.y / dx, pos.z / dx);
+
+        if (cell.x >= 0 && cell.x < gridWidth &&
+            cell.y >= 0 && cell.y < gridHeight &&
+            cell.z >= 0 && cell.z < gridDepth) {
+
+            int idx = cell.x + cell.y * gridWidth + cell.z * (gridWidth * gridHeight);
                 if(labels[idx] == Utility::AIR){
                     labels[idx] = Utility::FLUID;
                 }
-//                atomicCAS(&labels[idx], Utility::AIR, Utility::FLUID);
-            }
+//            atomicCAS(&labels[idx], Utility::AIR, Utility::FLUID);
         }
-    };
-}
-
+    }
+};
 
 #endif //UTILITY_H
