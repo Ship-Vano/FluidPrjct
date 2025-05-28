@@ -99,9 +99,8 @@ private:
 
     // FUNCTIONS
     // solver steps
-    void seedParticles(int particlesPerCell);
+    __host__ void seedParticles(int particlesPerCell);
     int labelGrid();
-    int labelGrid_gpu();
     void frameStep();
     void particlesToGrid();
     void saveVelocities();
@@ -141,9 +140,9 @@ public:
      Init a solver
      Args: name of a geometry file
      * */
-    void init(const std::string&);
+    __host__ void init(const std::string&);
 
-    void run(int max_steps);
+    __host__ void run(int max_steps);
 };
 
 #endif

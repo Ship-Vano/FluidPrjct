@@ -18,7 +18,7 @@ FluidSolver3D::~FluidSolver3D(){
 }
 
 
-void FluidSolver3D::init(const std::string& fileName) {
+__host__ void FluidSolver3D::init(const std::string& fileName) {
     std::ifstream file(fileName);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open file: " + fileName);
@@ -84,11 +84,9 @@ void FluidSolver3D::init(const std::string& fileName) {
     seedParticles(PARTICLES_PER_CELL);
     std::cout <<"Number of particles is" << h_particles.size() << std::endl;
     Utility::save3dParticlesToPLY(h_particles, "InputData/particles_0.ply");
-    //labelGrid();
-    //frameStep();
 }
 
-void FluidSolver3D::seedParticles(int particlesPerCell){
+__host__ void FluidSolver3D::seedParticles(int particlesPerCell){
     // Инициализация генератора (один раз вне функции!)
     static std::random_device rd;
     static std::mt19937 gen(rd());
@@ -96,6 +94,7 @@ void FluidSolver3D::seedParticles(int particlesPerCell){
     static std::uniform_real_distribution<> jitterDist(-0.24f, 0.24f);
 
     // Сначала подсчитываем общее количество частиц
+    h_particles.clear();
     size_t totalParticles = 0;
     for (int k = 0; k < gridDepth; ++k) {
         for (int j = 0; j < gridHeight; ++j) {
@@ -109,6 +108,7 @@ void FluidSolver3D::seedParticles(int particlesPerCell){
 
     // Резервируем память заранее
     h_particles.reserve(totalParticles);
+    d_particles.reserve(totalParticles);
 
     // Проходим по всем ячейкам с жидкостью
     for(int k = 0; k < gridDepth; ++k)
@@ -160,6 +160,97 @@ void FluidSolver3D::seedParticles(int particlesPerCell){
             }
         }
     }
-
+    thrust::copy(h_particles.begin(), h_particles.end(), d_particles.begin());
     blocksForParticles = (h_particles.size() + threadsPerBlock- 1) / threadsPerBlock;
+}
+
+
+
+__host__ int FluidSolver3D::labelGrid() {
+    // 1. Очистка сетки с помощью Thrust
+    thrust::transform(thrust::device,
+                      labels.device_ptr(),
+                      labels.device_ptr() + labels.size(),
+                      labels.device_ptr(),
+                      Utility::ClearLabelsFunctor());
+
+    // 2. Пометка ячеек с частицами
+    const int numParticles = d_particles.size();
+    if (numParticles > 0) {
+        Utility::MarkFluidCellsFunctor functor(
+                thrust::raw_pointer_cast(d_particles.data()),
+                dx,
+                labels.width(),
+                labels.height(),
+                labels.depth(),
+                labels.device_ptr()
+        );
+
+        thrust::for_each(thrust::device,
+                         thrust::counting_iterator<int>(0),
+                         thrust::counting_iterator<int>(numParticles),
+                         functor);
+    }
+
+    // 3. Проверка ошибок
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cerr << "labelGrid3D_gpu error: " << cudaGetErrorString(err) << std::endl;
+        return -1;
+    }
+
+    return 0;
+}
+
+__host__ void FluidSolver3D::frameStep(){
+    labelGrid();
+
+    /* //particles velocities to grid
+    particlesToGrid();
+
+    // экстраполяция в пределах +одна ячейка (для аккуратной очистки дивергенции)
+    extrapolateGridFluidData(u, gridWidth + 1, gridHeight, 2);
+    extrapolateGridFluidData(v, gridWidth, gridHeight + 1, 2);
+
+    //saving a copy of the current grid velocities (for FLIP)
+    saveVelocities();
+
+    //applying body forces on grid (e.g. gravity force)
+    applyForces();
+
+    pressureSolve();
+    applyPressure();
+
+    //grid velocities to particles
+    gridToParticles(PIC_WEIGHT);
+
+    //advection of particles
+    extrapolateGridFluidData(u, gridWidth + 1, gridHeight, gridWidth);
+    extrapolateGridFluidData(v, gridWidth, gridHeight + 1, gridHeight);
+    advectParticles(ADVECT_MAX);
+
+    //boundary penetration detection (if so --- move back inside)
+    cleanUpParticles(dx/2.0f);*/
+}
+
+__host__ void FluidSolver3D::run(int max_steps) {
+    // Prepare
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    // Start record
+    cudaEventRecord(start, 0);
+    for(int i = 0; i < max_steps; ++i){
+        frameStep();
+        if(i%10 == 0){
+            Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i) + ".ply");
+            std::cout << "frame = " << i/10 << "; numParticles = " << h_particles.size()<<std::endl;
+        }
+
+    }
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    float elapsedTime;
+    cudaEventElapsedTime(&elapsedTime, start, stop); // that's our time!
+    std::cout << "elapsed time = " << elapsedTime / 1000.0f << std::endl;
 }

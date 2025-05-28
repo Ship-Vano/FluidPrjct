@@ -17,6 +17,7 @@ int main(){
     solver.PIC_WEIGHT = (6.0f * dt)/(dx*dx);
     std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
     solver.init("InputData/labels_3d_sphere.txt");
+    solver.run(100);
 
     /*FluidSolver2D solver(100, 100, dx, dt);
     solver.PIC_WEIGHT = (6.0f * dt)/(dx*dx);
