@@ -12,6 +12,14 @@ __device__ float3 operator*(const float3& a, float b) {
     return make_float3(a.x * b, a.y * b, a.z * b);
 }
 
+__device__ float3 operator*(float b, const float3& a){
+    return a * b;
+}
+
+__device__ float operator*(const float3& a, const float3& b){
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
 __device__ double3 operator+(const double3& a, const double3& b) {
     return make_double3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
@@ -43,6 +51,10 @@ namespace Utility {
         return make_float2((i +0.5f)* dx, (j + 0.5f) * dx);
     }
 
+    float3 getGridCellPosition(float i, float j, float k, float dx) {
+        return make_float3((i +0.5f)* dx, (j + 0.5f) * dx, (k + 0.5f) * dx);
+    }
+
     void saveParticlesToFile(const std::vector<Particle2D>& particles,
                              const std::string& filename){
         std::ofstream file(filename, std::ios::binary);
@@ -69,6 +81,23 @@ namespace Utility {
 
         for (const auto p: particles) {
             file << p.pos.x << " " << p.pos.y << " " << 0.0 << "\n";
+        }
+    }
+
+    void save3dParticlesToPLY(const thrust::host_vector<Particle3D>& particles,
+                            const std::string& filename) {
+        std::ofstream file(filename);
+
+        file << "ply\n"
+             << "format ascii 1.0\n"
+             << "element vertex " << particles.size() << "\n"
+             << "property float x\n"
+             << "property float y\n"
+             << "property float z\n"
+             << "end_header\n";
+
+        for (const auto p: particles) {
+            file << p.pos.x << " " << p.pos.y << " " << p.pos.z << "\n";
         }
     }
 

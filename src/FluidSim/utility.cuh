@@ -28,6 +28,10 @@ __device__ float3 operator-(const float3& a, const float3& b);
 
 __device__ float3 operator*(const float3& a, float b);
 
+__device__ float3 operator*(float b, const float3& a);
+
+__device__ float operator*(const float3& a, const float3& b);
+
 __device__ double3 operator+(const double3& a, const double3& b);
 
 __device__ double3 operator-(const double3& a, const double3& b);
@@ -55,14 +59,22 @@ namespace Utility {
         Particle2D(float2 pos, float2 vel): pos(pos), vel(vel){}
     };
 
+    struct Particle3D {
+        float3 pos;
+        float3 vel;
+        Particle3D(float3 pos, float3 vel): pos(pos), vel(vel){}
+    };
+
     float2 getGridCellPosition(float i, float j, float dx);
+    float3 getGridCellPosition(float i, float j, float k, float dx);
     int2 getGridCellIndex(float2 pos, float dx);
 
     void saveParticlesToFile(const std::vector<Particle2D>& particles,
                              const std::string& filename);
     void saveParticlesToPLY(const std::vector<Particle2D>& particles,
                             const std::string& filename);
-
+    void save3dParticlesToPLY(const thrust::host_vector<Particle3D>& particles,
+                              const std::string& filename);
 
     __device__ int getGridCellIndex_device(float2 pos, float dx, int gridWidth);
 
@@ -77,14 +89,52 @@ namespace Utility {
     __device__ int2 getGridIndicesV(int ind, int gridWidth);
 
 
-    // matrixes and solvers
-    struct CSRMatrix {
-        int rows;           // Число строк (равно количеству fluid-ячеек)
-        int cols;           // Число столбцов (равно количеству fluid-ячеек)
-        int nnz;            // Количество ненулевых элементов
-        double* values;     // Массив значений (на GPU)
-        int* row_ptr;       // Массив указателей на строки (на GPU)
-        int* col_ind;       // Массив индексов столбцов (на GPU)
+    template <typename T>
+    class Grid3D {
+    protected:
+        int m_width, m_height, m_depth;
+
+    public:
+        thrust::host_vector<T> host_data;
+        thrust::device_vector<T> device_data;
+
+        Grid3D() : m_width(0), m_height(0), m_depth(0) {}
+
+        __host__ void resize(int w, int h, int d) {
+            m_width = w;
+            m_height = h;
+            m_depth = d;
+            host_data.resize(w * h * d);
+            device_data.resize(w * h * d);
+        }
+
+        __host__ void copy_to_device() {
+            thrust::copy(host_data.begin(), host_data.end(), device_data.begin());
+        }
+
+        __host__ void copy_to_host() {
+            thrust::copy(device_data.begin(), device_data.end(), host_data.begin());
+        }
+
+        __host__ __device__ int width() const { return m_width; }
+        __host__ __device__ int height() const { return m_height; }
+        __host__ __device__ int depth() const { return m_depth; }
+        __host__ __device__ int size() const { return m_width * m_height * m_depth; }
+
+        // Доступ на хосте
+        __host__ T& operator()(int i, int j, int k) {
+            return host_data[i + j * m_width + k * (m_width * m_height)];
+        }
+
+        // Доступ на устройстве
+        __device__ T& dev(int i, int j, int k) {
+            return device_data[i + j * m_width + k * (m_width * m_height)];
+        }
+
+        // Указатель на device-данные
+        __host__ T* device_ptr() {
+            return thrust::raw_pointer_cast(device_data.data());
+        }
     };
 
 }

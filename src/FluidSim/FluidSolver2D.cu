@@ -1151,8 +1151,8 @@ void FluidSolver2D::extrapolateGridFluidData(std::vector<float>& grid, int x, in
     std::vector<int> d(x*y, 0);
 
     // 0 для известных величин, int_max для неизвестных
-    for(int i = 0; i < x; ++i){
-        for(int j = 0; j < y; ++j){
+    for(int j = 0; j < y; ++j){
+        for(int i = 0; i < x; ++i){
             if(grid[i + j * x] != VEL_UNKNOWN){
                 d[i + j * x] = 0;
             }else{
