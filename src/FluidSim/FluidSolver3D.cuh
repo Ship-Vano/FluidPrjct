@@ -108,7 +108,6 @@ private:
     int pressureSolve();
     void applyPressure();
     void gridToParticles(float alpha);
-    void gridToParticles_gpu(float alpha);
     void advectParticles(float C);
     void cleanUpParticles(float delta);
     void extrapolateGridFluidData(std::vector<float>& grid, int x, int y, int depth);
@@ -123,7 +122,7 @@ private:
     std::vector<int> checkNeighbors(std::vector<int> grid, int3 dim, int3 index, int neighbors[][3], int numNeighbors, int value);
 
 public:
-    float PIC_WEIGHT = 0.5f;
+    float PIC_WEIGHT = 0.5f; // changed in the main
     /*
 	Creates a new 2D fluid solver.
 	Args:

@@ -75,11 +75,11 @@ namespace Utility {
     int2 getGridCellIndex(float2 pos, float dx);
 
     void saveParticlesToFile(const std::vector<Particle2D>& particles,
-                             const std::string& filename);
+                            const std::string& filename);
     void saveParticlesToPLY(const std::vector<Particle2D>& particles,
                             const std::string& filename);
     void save3dParticlesToPLY(const thrust::host_vector<Particle3D>& particles,
-                              const std::string& filename);
+                            const std::string& filename);
 
     __device__ int getGridCellIndex_device(float2 pos, float dx, int gridWidth);
 

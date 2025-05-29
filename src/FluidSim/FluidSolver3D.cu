@@ -181,10 +181,10 @@ __host__ void FluidSolver3D::seedParticles(int particlesPerCell){
 __host__ int FluidSolver3D::labelGrid() {
     // 1. Очистка сетки с помощью Thrust
     thrust::transform(thrust::device,
-                      labels.device_ptr(),
-                      labels.device_ptr() + labels.size(),
-                      labels.device_ptr(),
-                      ClearLabelsFunctor());
+                    labels.device_ptr(),
+                    labels.device_ptr() + labels.size(),
+                    labels.device_ptr(),
+                    ClearLabelsFunctor());
 
     // 2. Пометка ячеек с частицами
     const int numParticles = d_particles.size();
@@ -199,9 +199,9 @@ __host__ int FluidSolver3D::labelGrid() {
         );
 
         thrust::for_each(thrust::device,
-                         thrust::counting_iterator<int>(0),
-                         thrust::counting_iterator<int>(numParticles),
-                         functor);
+                        thrust::counting_iterator<int>(0),
+                        thrust::counting_iterator<int>(numParticles),
+                        functor);
     }
 
     // 3. Проверка ошибок
@@ -216,16 +216,16 @@ __host__ int FluidSolver3D::labelGrid() {
 
 void FluidSolver3D::saveVelocities() {
     thrust::copy(thrust::device,
-                 u.device_data.begin(), u.device_data.end(),
-                 uSaved.device_data.begin());
+                u.device_data.begin(), u.device_data.end(),
+                uSaved.device_data.begin());
 
     thrust::copy(thrust::device,
-                 v.device_data.begin(), v.device_data.end(),
-                 vSaved.device_data.begin());
+                v.device_data.begin(), v.device_data.end(),
+                vSaved.device_data.begin());
 
     thrust::copy(thrust::device,
-                 w.device_data.begin(), w.device_data.end(),
-                 wSaved.device_data.begin());
+                w.device_data.begin(), w.device_data.end(),
+                wSaved.device_data.begin());
 }
 
 // Структура для хранения временных данных (числители и знаменатели в p2g)
@@ -327,8 +327,8 @@ struct AccumulateVelocities {
     __device__
     float computeWeight(float3 p_pos, float3 node_pos, float dx) const {
         float3 dist = make_float3(p_pos.x - node_pos.x,
-                                  p_pos.y - node_pos.y,
-                                  p_pos.z - node_pos.z);
+                                p_pos.y - node_pos.y,
+                                p_pos.z - node_pos.z);
         float wx = fmaxf(0.0f, 1.0f - fabsf(dist.x / dx));
         float wy = fmaxf(0.0f, 1.0f - fabsf(dist.y / dx));
         float wz = fmaxf(0.0f, 1.0f - fabsf(dist.z / dx));
@@ -408,6 +408,357 @@ void FluidSolver3D::particlesToGrid() {
     );
 }
 
+struct ApplyScalarForce
+{
+    float dt, a, vel_unknown;
+
+    ApplyScalarForce(float _dt, float _a, float _vel_unknown)
+        : dt(_dt), a(_a), vel_unknown(_vel_unknown) {}
+
+    __host__ __device__
+    float operator()(const float& x) const {
+        return (x == vel_unknown) ? x : x + dt * a;
+    }
+};
+
+void FluidSolver3D::applyForces(){
+
+    thrust::transform(
+        u.device_data.begin(), u.device_data.end(),         // вход
+        u.device_data.begin(),                  // выход 
+        ApplyScalarForce(dt, GRAVITY.x, VEL_UNKNOWN)
+    );
+
+    thrust::transform(
+        v.device_data.begin(), v.device_data.end(),
+        v.device_data.begin(),
+        ApplyScalarForce(dt, GRAVITY.y, VEL_UNKNOWN)
+    );
+
+    thrust::transform(
+        w.device_data.begin(), w.device_data.end(),
+        w.device_data.begin(),
+        ApplyScalarForce(dt, GRAVITY.z, VEL_UNKNOWN)
+    );
+}
+
+// ----------------------------------
+// 1) Вспомогательная __device__-функция трёхлинейной интерполяции
+__host__ __device__
+float trilerp(const float* fld,
+                int i,int j,int k,
+                float fx,float fy,float fz,
+                int stride_i,int stride_j)
+{
+    #define SAMP(ii,jj,kk) fld[(ii) + (jj)*stride_i + (kk)*stride_j]
+    float c00 = SAMP(i  , j  , k  )*(1-fx) + SAMP(i+1, j  , k  )*fx;
+    float c10 = SAMP(i  , j+1, k  )*(1-fx) + SAMP(i+1, j+1, k  )*fx;
+    float c01 = SAMP(i  , j  , k+1)*(1-fx) + SAMP(i+1, j  , k+1)*fx;
+    float c11 = SAMP(i  , j+1, k+1)*(1-fx) + SAMP(i+1, j+1, k+1)*fx;
+    float c0  = c00*(1-fy) + c10*fy;
+    float c1  = c01*(1-fy) + c11*fy;
+    float c   = c0*(1-fz) + c1*fz;
+    #undef SAMP
+    return c;
+}
+
+// ----------------------------------
+// 2) Функтор переноса скоростей с сетки на частицу
+struct GridToParticleFunctor
+{
+    int W,H,D;
+    float3 origin;
+    float  dx, alpha;
+
+    // raw-пойнтеры на device_data[]
+    const float *u, *v, *w;
+    const float *du,*dv,*dw;
+
+    GridToParticleFunctor(int _W,int _H,int _D,
+                            float3 _orig,float _dx,float _alpha,
+                            const float* _u,const float* _v,const float* _w,
+                            const float* _du,const float* _dv,const float* _dw)
+        : W(_W), H(_H), D(_D),
+        origin(_orig), dx(_dx), alpha(_alpha),
+        u(_u), v(_v), w(_w),
+        du(_du), dv(_dv), dw(_dw)
+    {}
+
+    __device__
+    Utility::Particle3D operator()(const Utility::Particle3D& pin) const
+    {
+        Utility::Particle3D pout = pin;
+
+        // локальные координаты в ячейках
+        float rel_x = (pin.pos.x - origin.x) * (1.0f / dx);
+        float rel_y = (pin.pos.y - origin.y) * (1.0f / dx);
+        float rel_z = (pin.pos.z - origin.z) * (1.0f / dx);
+
+        int i = floorf(rel_x);
+        int j = floorf(rel_y);
+        int k = floorf(rel_z);
+
+        if (i < 0 || i >= W || j < 0 || j >= H || k < 0 || k >= D)
+            return pout;
+
+        float fx = rel_x - i;
+        float fy = rel_y - j;
+        float fz = rel_z - k;
+
+        // PIC: исходные u,v,w
+        float uc  = trilerp(u,  i, j, k, fx,fy,fz, (W+1), (W+1)*H);
+        float vc  = trilerp(v,  i, j, k, fx,fy,fz,  W,     W*(H+1));
+        float wc  = trilerp(w,  i, j, k, fx,fy,fz,  W,     W*H    );
+
+        // FLIP: дельты
+        float duc = trilerp(du, i, j, k, fx,fy,fz, (W+1), (W+1)*H);
+        float dvc = trilerp(dv, i, j, k, fx,fy,fz,  W,     W*(H+1));
+        float dwc = trilerp(dw, i, j, k, fx,fy,fz,  W,     W*H    );
+
+        // микс PIC/FLIP
+        pout.vel.x = alpha * uc + (pin.vel.x + duc) * (1.0f - alpha);
+        pout.vel.y = alpha * vc + (pin.vel.y + dvc) * (1.0f - alpha);
+        pout.vel.z = alpha * wc + (pin.vel.z + dwc) * (1.0f - alpha);
+
+        return pout;
+    }
+};
+
+// ----------------------------------
+// 3) Обновляем метод FluidSolver3D::gridToParticles
+void FluidSolver3D::gridToParticles(float alpha)
+{
+    // размеры MAC-решёток
+    int Nu = (gridWidth+1)*gridHeight*gridDepth;
+    int Nv = gridWidth*(gridHeight+1)*gridDepth;
+    int Nw = gridWidth*gridHeight*(gridDepth+1);
+
+    // 3.1) вычисляем дельты в конструкторах device_vector
+    thrust::device_vector<float> du(Nu);
+    thrust::device_vector<float> dv(Nv);
+    thrust::device_vector<float> dw(Nw);
+
+    // вместо zip_iterator:
+    thrust::transform(
+        u.device_data.begin(),                   // new
+        u.device_data.end(),
+        uSaved.device_data.begin(),              // old
+        du.begin(),                              // out
+        thrust::minus<float>()                   // new - old
+    );
+
+    thrust::transform(
+        v.device_data.begin(),
+        v.device_data.end(),
+        vSaved.device_data.begin(),
+        dv.begin(),
+        thrust::minus<float>()
+    );
+
+    thrust::transform(
+        w.device_data.begin(),
+        w.device_data.end(),
+        wSaved.device_data.begin(),
+        dw.begin(),
+        thrust::minus<float>()
+    );
+
+    // 3.2) raw-пойнтеры из Grid3D
+    const float* pu  = u.device_ptr();
+    const float* pv  = v.device_ptr();
+    const float* pw  = w.device_ptr();
+    const float* pdu = du.data().get();  // device_vector<float>::data().get()
+    const float* pdv = dv.data().get();
+    const float* pdw = dw.data().get();
+
+    // 3.3) один transform по частицам
+    thrust::transform(
+        d_particles.begin(),
+        d_particles.end(),
+        d_particles.begin(),
+        GridToParticleFunctor(
+            gridWidth, gridHeight, gridDepth,
+            make_float3(0,0,0),  // origin
+            dx, alpha,
+            pu, pv, pw,
+            pdu, pdv, pdw
+        )
+    );
+}
+
+__device__ inline bool isCellValid(int x, int y, int z, int W, int H, int D) {
+    return x >= 0 && x < W && y >= 0 && y < H && z >= 0 && z < D;
+}
+
+__device__ inline int idx3d(int x , int y, int z, int W, int H){
+    return x + y * W + z * W * H;
+}
+
+__device__
+float3 interpVelDevice3D(const float* uGrid, const float* vGrid, const float* wGrid,
+                            int W,int H,int D, float dx, float3 pos){
+    // переводим в "ячейковые" координаты
+    float rx = pos.x / dx;
+    float ry = pos.y / dx;
+    float rz = pos.z / dx;
+    int i = min(max(int(floorf(rx)), 0), W);
+    int j = min(max(int(floorf(ry)), 0), H);
+    int k = min(max(int(floorf(rz)), 0), D);
+    float fx = rx - i;
+    float fy = ry - j;
+    float fz = rz - k;
+
+    // strides
+    int s_i = 1;
+    int s_j = (W+1);
+
+    float ux = trilerp(uGrid, i, j, k, fx, fy, fz, s_i, s_j);
+    float vy = trilerp(vGrid, i, j, k, fx, fy, fz, s_i, s_j);
+    float wz = trilerp(wGrid, i, j, k, fx, fy, fz, s_i, s_j);
+
+    return make_float3(ux, vy, wz);
+}
+
+__device__
+bool projectParticleDevice3D(Utility::Particle3D &p,
+                            const int* labels,
+                            int W,int H,int D, float dx)
+{
+    // 26 соседей в 3D
+    const int off[26][3] = {
+        {-1,-1,-1},{-1,-1, 0},{-1,-1, 1},{-1, 0,-1},{-1, 0, 0},{-1, 0, 1},{-1, 1,-1},{-1, 1, 0},{-1, 1, 1},
+        { 0,-1,-1},{ 0,-1, 0},{ 0,-1, 1},{ 0, 0,-1},            { 0, 0, 1},{ 0, 1,-1},{ 0, 1, 0},{ 0, 1, 1},
+        { 1,-1,-1},{ 1,-1, 0},{ 1,-1, 1},{ 1, 0,-1},{ 1, 0, 0},{ 1, 0, 1},{ 1, 1,-1},{ 1, 1, 0},{ 1, 1, 1}
+    };
+
+    // текущая ячейка
+    int cx = int(floorf(p.pos.x/dx));
+    int cy = int(floorf(p.pos.y/dx));
+    int cz = int(floorf(p.pos.z/dx));
+
+    float3 bestPos = p.pos;
+    float  bestD   = 1e10f;
+    bool   found   = false;
+
+    // сначала ищем SOLID, потом AIR
+    for(int pass=0;pass<2;++pass){
+        int want = (pass==0 ? Utility::SOLID : Utility::AIR);
+        for(int n=0;n<26;++n){
+            int nx = cx+off[n][0],
+                ny = cy+off[n][1],
+                nz = cz+off[n][2];
+            if(!isCellValid(nx,ny,nz,W,H,D)) continue;
+            int idx = nx + ny*W + nz*W*H;
+            if(labels[idx] != want) continue;
+
+            float3 posC = make_float3(
+                (nx+0.5f)*dx,
+                (ny+0.5f)*dx,
+                (nz+0.5f)*dx
+            );
+            float d = sqrtf((posC.x-p.pos.x)*(posC.x-p.pos.x)
+                        + (posC.y-p.pos.y)*(posC.y-p.pos.y)
+                        + (posC.z-p.pos.z)*(posC.z-p.pos.z));
+            if(d < bestD){
+                bestD = d;
+                bestPos = posC;
+                found = true;
+            }
+        }
+        if(found) break;
+    }
+    if(!found) return false;
+
+    // сдвигаем на 1.0*(bestPos - p.pos)
+    p.pos.x = bestPos.x;
+    p.pos.y = bestPos.y;
+    p.pos.z = bestPos.z;
+    return true;
+}
+
+struct AdvectParticlesFunctor {
+    float dt, dx, C;
+    int W, H, D;
+    const float* u;
+    const float* v;
+    const float* w;
+    const int* labels;
+
+    __host__ AdvectParticlesFunctor(float _dt,float _dx,float _C,
+                            int _W,int _H,int _D,
+                            const float* _u,const float* _v,const float* _w,
+                            const int*   _labels)
+        : dt(_dt), dx(_dx), C(_C),
+        W(_W), H(_H), D(_D),
+        u(_u), v(_v), w(_w),
+        labels(_labels) {}
+
+    __device__ Utility::Particle3D operator()(const Utility::Particle3D& pin) const {
+        Utility::Particle3D p = pin;
+        float subT = 0.0f;
+        bool finished = false;
+
+        while (!finished) {
+            // 1) Интерполируем скорость
+            float3 vel = interpVelDevice3D(u,v,w, W,H,D, dx, p.pos);
+
+            // 2) Считаем dT
+            float speed = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z) + 1e-37f;
+            float dT = (C * dx) / speed;
+            if (subT + dT >= dt) {
+                dT = dt - subT;
+                finished = true;
+            } else if (subT + 2*dT >= dt) {
+                dT *= 0.5f;
+            }
+
+            // 3) Явный Эйлер
+            p.pos.x += vel.x * dT;
+            p.pos.y += vel.y * dT;
+            p.pos.z += vel.z * dT;
+            subT += dT;
+
+            // 4) Границы и NaN
+            if (p.pos.x < 0 || p.pos.y < 0 || p.pos.z < 0 ||
+                isnan(p.pos.x) || isnan(p.pos.y) || isnan(p.pos.z)) {
+                break;
+            }
+
+            // 5) Попал в SOLID?
+            int cx = int(floorf(p.pos.x/dx));
+            int cy = int(floorf(p.pos.y/dx));
+            int cz = int(floorf(p.pos.z/dx));
+            if (isCellValid(cx,cy,cz,W,H,D) &&
+                labels[idx3d(cx,cy,cz,W,H)] == Utility::SOLID)
+            {
+                if (!projectParticleDevice3D(p, labels, W,H,D, dx*0.25f))
+                    break;
+            }
+        }
+        return p;
+    }
+};
+
+void FluidSolver3D::advectParticles(float C){
+
+    const float* pu = u.device_ptr();
+    const float* pv = v.device_ptr();
+    const float* pw = w.device_ptr();
+    const int*   pl = labels.device_ptr();
+
+    thrust::transform(
+        d_particles.begin(),
+        d_particles.end(),
+        d_particles.begin(),
+        AdvectParticlesFunctor(
+            dt, dx, C,
+            gridWidth, gridHeight, gridDepth,
+            pu, pv, pw,
+            pl
+        )
+    );
+}
+
 __host__ void FluidSolver3D::frameStep(){
     labelGrid();
 
@@ -417,31 +768,37 @@ __host__ void FluidSolver3D::frameStep(){
     //saving a copy of the current grid velocities (for FLIP)
     saveVelocities();
 
+    //applying body forces on grid (e.g. gravity force)
+    applyForces();
+
+    //grid velocities to particles
+    gridToParticles(PIC_WEIGHT);
+
+    advectParticles(ADVECT_MAX);
 /*
     // экстраполяция в пределах +одна ячейка (для аккуратной очистки дивергенции)
     extrapolateGridFluidData(u, gridWidth + 1, gridHeight, 2);
     extrapolateGridFluidData(v, gridWidth, gridHeight + 1, 2);
 
 
-    //applying body forces on grid (e.g. gravity force)
-    applyForces();
+    
 
     pressureSolve();
     applyPressure();
 
-    //grid velocities to particles
-    gridToParticles(PIC_WEIGHT);
+    
 
     //advection of particles
     extrapolateGridFluidData(u, gridWidth + 1, gridHeight, gridWidth);
     extrapolateGridFluidData(v, gridWidth, gridHeight + 1, gridHeight);
-    advectParticles(ADVECT_MAX);
+    
 
     //boundary penetration detection (if so --- move back inside)
     cleanUpParticles(dx/2.0f);*/
 }
 
 __host__ void FluidSolver3D::run(int max_steps) {
+    d_particles = h_particles;
     // Prepare
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
@@ -451,6 +808,7 @@ __host__ void FluidSolver3D::run(int max_steps) {
     for(int i = 0; i < max_steps; ++i){
         frameStep();
         if(i%10 == 0){
+            h_particles = d_particles;
             Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i) + ".ply");
             std::cout << "frame = " << i/10 << "; numParticles = " << h_particles.size()<<std::endl;
         }
