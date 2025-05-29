@@ -759,6 +759,176 @@ void FluidSolver3D::advectParticles(float C){
     );
 }
 
+
+struct RHSCalculator3D {
+    const int* labels;
+    const float* u, *v, *w;
+    float scale;
+    int W, H, D;
+
+    __host__ __device__
+    float operator()(int idx) const {
+        int i = idx % W;
+        int j = (idx / W) % H;
+        int k = idx / (W * H);
+
+        if (labels[idx] != Utility::FLUID) return 0.0f;
+
+        float div =
+                u[i+1 + j*(W+1) + k*(W+1)*H] - u[i + j*(W+1) + k*(W+1)*H] +
+                v[i + (j+1)*W + k*W*(H+1)] - v[i + j*W + k*W*(H+1)] +
+                w[i + j*W + (k+1)*W*H] - w[i + j*W + k*W*H];
+
+        float rhs_val = -scale * div;
+
+        // Solid boundary conditions
+        if (i-1 >= 0 && labels[idx - 1] == Utility::SOLID)
+            rhs_val -= scale * (u[i + j*(W+1) + k*(W+1)*H] - 0.0f);
+        if (i+1 < W && labels[idx + 1] == Utility::SOLID)
+            rhs_val += scale * (u[i+1 + j*(W+1) + k*(W+1)*H] - 0.0f);
+
+        if (j-1 >= 0 && labels[idx - W] == Utility::SOLID)
+            rhs_val -= scale * (v[i + j*W + k*W*(H+1)] - 0.0f);
+        if (j+1 < H && labels[idx + W] == Utility::SOLID)
+            rhs_val += scale * (v[i + (j+1)*W + k*W*(H+1)] - 0.0f);
+
+        if (k-1 >= 0 && labels[idx - W*H] == Utility::SOLID)
+            rhs_val -= scale * (w[i + j*W + k*W*H] - 0.0f);
+        if (k+1 < D && labels[idx + W*H] == Utility::SOLID)
+            rhs_val += scale * (w[i + j*W + (k+1)*W*H] - 0.0f);
+
+        return rhs_val;
+    }
+};
+
+
+
+struct FluidFlagFunctor {
+    __host__ __device__
+    int operator()(int label) const {
+        return label == Utility::FLUID ? 1 : 0;
+    }
+};
+
+
+
+struct FluidCellPredicate {
+    const int* labels;
+    const int FLUID;
+
+    __device__
+    bool operator()(int idx) const {
+        return labels[idx] == FLUID;
+    }
+};
+
+
+void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs) {
+
+    float scale = (FLUID_DENSITY * dx) / dt;
+    int totalCells = gridWidth * gridHeight * gridDepth;
+
+    thrust::device_vector<float> rhs_temp(totalCells);
+
+    thrust::transform(
+            thrust::counting_iterator<int>(0),
+            thrust::counting_iterator<int>(totalCells),
+            rhs_temp.begin(),
+            RHSCalculator3D{
+                    thrust::raw_pointer_cast(labels.device_ptr()),
+                    thrust::raw_pointer_cast(u.device_ptr()),
+                    thrust::raw_pointer_cast(v.device_ptr()),
+                    thrust::raw_pointer_cast(w.device_ptr()),
+                    scale,
+                    gridWidth, gridHeight, gridDepth
+            }
+    );
+
+    /* ДО (пример)
+        Индексы:    [0]     [1]     [2]     [3]
+        rhs_temp:  [1.0]  [2.0]  [3.0]  [4.0]
+        labels:    [SOLID] [FLUID] [AIR] [FLUID]
+     * */
+    /* После (пример)
+        rhs: [2.0] [4.0]  // Только FLUID-ячейки
+        fluidCellsAmount = 2
+     * */
+
+    //  Подсчитываем количество жидких ячеекisFLuid isFluid;
+
+    fluidCellsAmount = thrust::transform_reduce(
+            thrust::device,
+            labels.device_data.begin(),
+            labels.device_data.end(),
+            FluidFlagFunctor(),  // Преобразует метку в 1/0
+            0,                       // Начальное значение суммы
+            thrust::plus<int>()      // Операция сложения
+    );
+
+    rhs.resize(fluidCellsAmount);
+
+    // Compact to fluid cells only
+    auto new_end = thrust::copy_if(
+            rhs_temp.begin(), rhs_temp.end(),
+            thrust::counting_iterator<int>(0),
+            rhs.begin(),
+            FluidCellPredicate{
+                    thrust::raw_pointer_cast(labels.device_ptr()),
+                    Utility::FLUID
+            }
+    );
+    //fluidCellsAmount = thrust::distance(rhs.begin(), new_end);
+}
+
+
+
+int FluidSolver3D::pressureSolve() {
+    // новая нумерация
+    thrust::device_vector<int> fluidNumbers_d(gridWidth * gridHeight * gridDepth, -1);
+    thrust::sequence(thrust::device, fluidNumbers_d.begin(), fluidNumbers_d.end());
+    thrust::device_vector<int> flags(labels.size());
+
+    /*ЧТО ХОТИМ СДЕЛАТЬ НИЖЕ: ВВЕСТИ НОВУЮ НУМЕРАЦИЮ.
+     * Ячейка	Метка	flags	fluidNumbers_d
+       (0,0,0)	FLUID	 1	     0
+       (1,0,0)	SOLID	 0	     1
+       (2,0,0)	FLUID	 1	     1
+     * */
+    thrust::transform(
+            thrust::device,
+            labels.device_ptr(),
+            labels.device_ptr() + labels.size(),
+            flags.begin(),
+            FluidFlagFunctor()
+    );
+
+    thrust::exclusive_scan(
+            thrust::device,
+            flags.begin(), flags.end(),
+            fluidNumbers_d.begin()
+    );
+
+    // Construct RHS and matrix
+    thrust::device_vector<float> rhs_d(fluidCellsAmount);
+    thrust::device_vector<float> csr_values;
+    thrust::device_vector<int> csr_columns;
+    thrust::device_vector<int> csr_offsets(fluidCellsAmount+1);
+
+    constructRHS(rhs_d);
+//    constructA(csr_values, csr_columns, csr_offsets);
+//
+//    // Solve with cuDSS (similar to 2D version)
+//    // ... [cuDSS setup and solve] ...
+//
+//    // Copy pressure back to grid
+//    thrust::copy(x_solution.begin(), x_solution.end(), p.device_ptr());
+    return 1;
+}
+
+void FluidSolver3D::applyPressure() {
+
+}
+
 __host__ void FluidSolver3D::frameStep(){
     labelGrid();
 
@@ -775,26 +945,11 @@ __host__ void FluidSolver3D::frameStep(){
     gridToParticles(PIC_WEIGHT);
 
     advectParticles(ADVECT_MAX);
-/*
-    // экстраполяция в пределах +одна ячейка (для аккуратной очистки дивергенции)
-    extrapolateGridFluidData(u, gridWidth + 1, gridHeight, 2);
-    extrapolateGridFluidData(v, gridWidth, gridHeight + 1, 2);
-
-
-    
 
     pressureSolve();
-    applyPressure();
+//    applyPressure();
 
-    
 
-    //advection of particles
-    extrapolateGridFluidData(u, gridWidth + 1, gridHeight, gridWidth);
-    extrapolateGridFluidData(v, gridWidth, gridHeight + 1, gridHeight);
-    
-
-    //boundary penetration detection (if so --- move back inside)
-    cleanUpParticles(dx/2.0f);*/
 }
 
 __host__ void FluidSolver3D::run(int max_steps) {

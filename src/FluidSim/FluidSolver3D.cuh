@@ -114,7 +114,7 @@ private:
     // helpers
     bool isFluid(int i, int j, int k);
     bool isCellValid(int x, int y, int z);
-    void constructRHS(std::vector<float>& rhs);
+    void constructRHS(thrust::device_vector<float>& rhs);
     void constructA(std::vector<float>& csr_values, std::vector<int>& csr_columns, std::vector<int>& csr_offsets);
     float2 interpVel(std::vector<float>& uGrid, std::vector<float>& vGrid, std::vector<float>& wGrid, float3 pos);
     bool projectParticle(Utility::Particle3D* particle, float max_h);

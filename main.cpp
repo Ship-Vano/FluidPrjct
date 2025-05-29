@@ -25,5 +25,17 @@ int main(){
     solver.init("InputData/labels_colimn.txt");
     solver.run(3000);*/
     std::cout << "success!" << std::endl;
+
+    struct is_odd
+    {
+        __host__ __device__
+        bool operator()(int &x)
+        {
+            return x & 1;
+        }
+    };
+
+
+
     return 0;
 }

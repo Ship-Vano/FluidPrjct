@@ -16,6 +16,7 @@
 #include <thrust/functional.h>
 #include <thrust/iterator/zip_iterator.h>
 #include <thrust/for_each.h>
+#include <thrust/count.h>
 
 
 #include <random>
