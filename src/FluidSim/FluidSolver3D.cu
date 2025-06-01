@@ -872,14 +872,14 @@ void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs, const thrust
             }
     );
 
-    std::cout << "rhs_temp:"<<std::endl;
-    thrust::host_vector<float> rhs_temp_h = rhs_temp;
-    for(int j = 0; j < gridHeight; ++j){
-        for(int i  =0 ; i < gridWidth ; ++i){
-            std::cout << rhs_temp_h[i + j * gridWidth] << ", ";
-        }
-        std::cout << std::endl;
-    }
+//    std::cout << "rhs_temp:"<<std::endl;
+//    thrust::host_vector<float> rhs_temp_h = rhs_temp;
+//    for(int j = 0; j < gridHeight; ++j){
+//        for(int i  =0 ; i < gridWidth ; ++i){
+//            std::cout << rhs_temp_h[i + j * gridWidth] << ", ";
+//        }
+//        std::cout << std::endl;
+//    }
 
 
     const int result_size = thrust::count(fluidFlags.begin(), fluidFlags.end(), 1);
@@ -896,13 +896,13 @@ void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs, const thrust
     );
 
     // Вывод результата
-    thrust::host_vector<float> rhs_h = rhs;
-    std::cout << "Copied values: ";
-    for (float val : rhs_h) {
-        std::cout << val << " ";
-    }
-    std::cout << std::endl;
-    std::cout << "----" << std::endl;
+//    thrust::host_vector<float> rhs_h = rhs;
+//    std::cout << "Copied values: ";
+//    for (float val : rhs_h) {
+//        std::cout << val << " ";
+//    }
+//    std::cout << std::endl;
+//    std::cout << "----" << std::endl;
 //    thrust::transform(
 //            thrust::device,
 //            thrust::counting_iterator<int>(0),
@@ -1083,9 +1083,28 @@ void FluidSolver3D::constructA(
     csr_offsets.back() = csr_values.size();
 }
 
+/**@deprecated*/
 struct CopySolutionFunctor {
     __device__ float operator()(int fluidIdx, float solValue) const {
         return (fluidIdx >= 0) ? solValue : 0.0f;
+    }
+};
+
+struct GlobalToLocal {
+    const int* flags;       // Указатель на вектор флагов
+    const int* old_to_new;  // Указатель на вектор преобразования индексов
+    const float* local_vals; // Указатель на локальные значения
+
+    GlobalToLocal(const int* f, const int* m, const float* l)
+            : flags(f), old_to_new(m), local_vals(l) {}
+
+    __host__ __device__
+    float operator()(int global_idx) const {
+        if (flags[global_idx] == 1) {
+            int local_idx = old_to_new[global_idx];
+            return local_vals[local_idx];
+        }
+        return 0.0f; // Значение по умолчанию
     }
 };
 
@@ -1112,14 +1131,14 @@ int FluidSolver3D::pressureSolve() {
             FluidFlagFunctor()
     );
 
-    std::cout << "flags:" << std::endl;
-    thrust::host_vector<float> flags_h = flags;
-    for(int j = 0; j < gridHeight; ++j){
-        for(int i = 0; i < gridWidth; ++i){
-            std::cout << flags_h[i + j*gridWidth] << ", ";
-        }
-        std::cout << std::endl;
-    }
+//    std::cout << "flags:" << std::endl;
+//    thrust::host_vector<float> flags_h = flags;
+//    for(int j = 0; j < gridHeight; ++j){
+//        for(int i = 0; i < gridWidth; ++i){
+//            std::cout << flags_h[i + j*gridWidth] << ", ";
+//        }
+//        std::cout << std::endl;
+//    }
 
 
     // с помощью префиксной суммы (не включая текущий жлемент, exclusive) получаем индексы жидких ячеек в новой нумерации (флаги нужны для получения таких сумм)
@@ -1139,33 +1158,33 @@ int FluidSolver3D::pressureSolve() {
             0,
             thrust::plus<int>()
     );
-    std::cout << "fluidCelssAmount = " << fluidCellsAmount << std::endl;
+//    std::cout << "fluidCelssAmount = " << fluidCellsAmount << std::endl;
     if (fluidCellsAmount == 0) {
         std::cerr << "No fluid cells found!" << std::endl;
         return -1;
     }
 
     //  Построение правой части (RHS)
-    thrust::device_vector<float> rhs_d(fluidCellsAmount, 0.0f);
+    thrust::device_vector<float> rhs_d;
     constructRHS(rhs_d, fluidNumbers_d, flags);
 
-    std::cout << "fluidNumbers:" << std::endl;
-    thrust::host_vector<float> fluidNumbers = fluidNumbers_d;
-    for(int j = 0; j < gridHeight; ++j){
-        for(int i = 0; i < gridWidth; ++i){
-            std::cout << fluidNumbers[i + j*gridWidth] << ", ";
-        }
-        std::cout << std::endl;
-    }
-
-    std::cout << "rhs for new system:" << std::endl;
-    thrust::host_vector<float> rhs = rhs_d;
-    for(int j = 0; j < gridHeight; ++j){
-        for(int i = 0; i < gridWidth; ++i){
-            std::cout << rhs[i + j*gridWidth] << ", ";
-        }
-        std::cout << std::endl;
-    }
+//    std::cout << "fluidNumbers:" << std::endl;
+//    thrust::host_vector<float> fluidNumbers = fluidNumbers_d;
+//    for(int j = 0; j < gridHeight; ++j){
+//        for(int i = 0; i < gridWidth; ++i){
+//            std::cout << fluidNumbers[i + j*gridWidth] << ", ";
+//        }
+//        std::cout << std::endl;
+//    }
+//
+//    std::cout << "rhs for new system:" << std::endl;
+//    thrust::host_vector<float> rhs = rhs_d;
+//    for(int j = 0; j < gridHeight; ++j){
+//        for(int i = 0; i < gridWidth; ++i){
+//            std::cout << rhs[i + j*gridWidth] << ", ";
+//        }
+//        std::cout << std::endl;
+//    }
 
     //  Построение матрицы A в формате CSR
     thrust::device_vector<float> csr_values;
@@ -1265,12 +1284,23 @@ int FluidSolver3D::pressureSolve() {
 
     //  Копирование решения в сетку давления
     thrust::device_vector<float> p_temp(w_x_h_x_d, 0.0f);
+//    thrust::transform(
+//            thrust::device,
+//            fluidNumbers_d.begin(), fluidNumbers_d.end(),
+//            solution.begin(),
+//            p_temp.begin(),
+//            CopySolutionFunctor()
+//    );
+    GlobalToLocal transformer(
+            thrust::raw_pointer_cast(flags.data()),
+            thrust::raw_pointer_cast(fluidNumbers_d.data()),
+            thrust::raw_pointer_cast(solution.data())
+    );
     thrust::transform(
-            thrust::device,
-            fluidNumbers_d.begin(), fluidNumbers_d.end(),
-            solution.begin(),
-            p_temp.begin(),
-            CopySolutionFunctor()
+            thrust::make_counting_iterator(0),      // Итератор глобальных индексов: 0,1,2,...
+            thrust::make_counting_iterator(w_x_h_x_d), // Конец индексов
+            p_temp.begin(),                   // Выходной итератор
+            transformer                             // Функтор преобразования
     );
 
     thrust::copy(p_temp.begin(), p_temp.end(), p.device_data.begin());
@@ -1419,7 +1449,7 @@ __host__ void FluidSolver3D::run(int max_steps) {
     cudaEventRecord(start, 0);
     for(int i = 0; i < max_steps; ++i){
         frameStep();
-        if(i%1 == 0){
+        if(i%10 == 0){
             h_particles = d_particles;
             Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i) + ".ply");
             std::cout << "frame = " << i/10 << "; numParticles = " << h_particles.size()<<std::endl;
