@@ -13,17 +13,17 @@ int main(){
     float dt = 0.01f;
     float dx = 0.5f;
 
-    FluidSolver3D solver(35, 35, 35, dx, dt);
+    FluidSolver3D solver(5, 5, 5, dx, dt);
     solver.PIC_WEIGHT = (6.0f * dt)/(dx*dx);
     std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
-    solver.init("InputData/labels_3d_sphere.txt");
-    solver.run(100);
+    solver.init("InputData/labels_simple3d.txt");
+    solver.run(1);
 
-    /*FluidSolver2D solver(100, 100, dx, dt);
-    solver.PIC_WEIGHT = (6.0f * dt)/(dx*dx);
-    std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
-    solver.init("InputData/labels_colimn.txt");
-    solver.run(3000);*/
+    FluidSolver2D solver2d(5, 5, dx, dt);
+    solver2d.PIC_WEIGHT = (6.0f * dt)/(dx*dx);
+    std::cout << "alpha = " << solver2d.PIC_WEIGHT << std::endl;
+    solver2d.init("InputData/labels_simple.txt");
+    solver2d.run(1);
     std::cout << "success!" << std::endl;
 
     struct is_odd

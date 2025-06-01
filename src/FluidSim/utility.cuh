@@ -17,6 +17,7 @@
 #include <thrust/iterator/zip_iterator.h>
 #include <thrust/for_each.h>
 #include <thrust/count.h>
+#include <thrust/iterator/permutation_iterator.h>
 
 
 #include <random>

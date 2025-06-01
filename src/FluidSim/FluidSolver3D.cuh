@@ -69,7 +69,7 @@ private:
     //Simulation parameters
 
     // number of particles to seed in each cell at start of sim
-    const int PARTICLES_PER_CELL = 6;
+    const int PARTICLES_PER_CELL = 8;
     // the amount of weight to give to PIC in PIC/FLIP update
 
     // the maximum number of grid cells a particle should move when advected
@@ -114,7 +114,7 @@ private:
     // helpers
     bool isFluid(int i, int j, int k);
     bool isCellValid(int x, int y, int z);
-    void constructRHS(thrust::device_vector<float>& rhs, const thrust::device_vector<int>& fluidNumbers);
+    void constructRHS(thrust::device_vector<float>& rhs, const thrust::device_vector<int>& fluidNumbers, const thrust::device_vector<int>& fluidFlags);
     void constructA(thrust::device_vector<float>& csr_values, thrust::device_vector<int>& csr_columns, thrust::device_vector<int>& csr_offsets, thrust::device_vector<int> fluidNumbers);
     float2 interpVel(std::vector<float>& uGrid, std::vector<float>& vGrid, std::vector<float>& wGrid, float3 pos);
     bool projectParticle(Utility::Particle3D* particle, float max_h);

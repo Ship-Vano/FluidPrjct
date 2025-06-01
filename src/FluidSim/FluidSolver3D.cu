@@ -173,7 +173,8 @@ __host__ void FluidSolver3D::seedParticles(int particlesPerCell){
             }
         }
     }
-    thrust::copy(h_particles.begin(), h_particles.end(), d_particles.begin());
+    //thrust::copy(h_particles.begin(), h_particles.end(), d_particles.begin());
+    d_particles = h_particles;
     blocksForParticles = (h_particles.size() + threadsPerBlock- 1) / threadsPerBlock;
 }
 
@@ -698,8 +699,8 @@ struct AdvectParticlesFunctor {
         Utility::Particle3D p = pin;
         float subT = 0.0f;
         bool finished = false;
-
-        while (!finished) {
+        int iter = 0;
+        while (!finished && iter++ < 100) {
             // 1) Интерполируем скорость
             float3 vel = interpVelDevice3D(u,v,w, W,H,D, dx, p.pos);
 
@@ -732,7 +733,7 @@ struct AdvectParticlesFunctor {
             if (isCellValid(cx,cy,cz,W,H,D) &&
                 labels[idx3d(cx,cy,cz,W,H)] == Utility::SOLID)
             {
-                if (!projectParticleDevice3D(p, labels, W,H,D, dx*0.25f))
+                if (!projectParticleDevice3D(p, labels, W,H,D, dx))
                     break;
             }
         }
@@ -779,24 +780,24 @@ struct RHSCalculator3D {
                 u[(i+1) + j*(W+1) + k*(W+1)*H] - u[i + j*(W+1) + k*(W+1)*H] +
                 v[i + (j+1)*W + k*W*(H+1)] - v[i + j*W + k*W*(H+1)] +
                 w[i + j*W + (k+1)*W*H] - w[i + j*W + k*W*H];
-
         float rhs_val = -scale * div;
 
         // Solid boundaries
         if (i-1 >= 0 && labels[idx-1] == Utility::SOLID)
             rhs_val -= scale * (u[i + j*(W+1) + k*(W+1)*H] - 0.0f);
-        if (i+1 < W && labels[idx+1] == Utility::SOLID)
+        if (i < W && labels[idx+1] == Utility::SOLID)
             rhs_val += scale * (u[(i+1) + j*(W+1) + k*(W+1)*H] - 0.0f);
         if (j-1 >= 0 && labels[idx-W] == Utility::SOLID)
             rhs_val -= scale * (v[i + j*W + k*W*(H+1)] - 0.0f);
-        if (j+1 < H && labels[idx+W] == Utility::SOLID)
+        if (j < H && labels[idx+W] == Utility::SOLID)
             rhs_val += scale * (v[i + (j+1)*W + k*W*(H+1)] - 0.0f);
         if (k-1 >= 0 && labels[idx-W*H] == Utility::SOLID)
             rhs_val -= scale * (w[i + j*W + k*W*H] - 0.0f);
-        if (k+1 < D && labels[idx+W*H] == Utility::SOLID)
+        if (k < D && labels[idx+W*H] == Utility::SOLID)
             rhs_val += scale * (w[i + j*W + (k+1)*W*H] - 0.0f);
 
         rhs_temp[idx] = rhs_val;
+
     }
 };
 
@@ -831,38 +832,87 @@ struct FluidCellPredicate {
 };
 
 
-void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs, const thrust::device_vector<int>& fluidNumbers) {
+struct IsSelected {
+    const int* flags; // Указатель на данные вектора меток
+
+    IsSelected(const int* flags_ptr) : flags(flags_ptr) {}
+
+    __host__ __device__
+    bool operator()(const int idx) const {
+        return flags[idx] == 1; // Возвращает true, если метка равна 1
+    }
+};
+
+// Функтор-трансформатор (просто возвращает значение)
+struct ValueTransformer {
+    __host__ __device__
+    float operator()(float val) const {
+        return val;
+    }
+};
+
+void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs, const thrust::device_vector<int>& fluidNumbers, const thrust::device_vector<int>& fluidFlags) {
 
     float scale = (FLUID_DENSITY * dx) / dt;
-    int totalCells = w_x_h_x_d;
 
-    thrust::device_vector<float> rhs_temp(totalCells, 0.0f);
+    thrust::device_vector<float> rhs_temp(w_x_h_x_d, 0.0f);
 
     thrust::for_each_n(
             thrust::device,
             thrust::counting_iterator<int>(0),
-            gridWidth * gridHeight * gridDepth,
+            w_x_h_x_d,
             RHSCalculator3D{
-                    thrust::raw_pointer_cast(labels.device_ptr()),
-                    thrust::raw_pointer_cast(u.device_ptr()),
-                    thrust::raw_pointer_cast(v.device_ptr()),
-                    thrust::raw_pointer_cast(w.device_ptr()),
+                    labels.device_ptr(),
+                    u.device_ptr(),
+                    v.device_ptr(),
+                    w.device_ptr(),
                     scale,
                     gridWidth, gridHeight, gridDepth,
                     thrust::raw_pointer_cast(rhs_temp.data())
             }
     );
 
-    thrust::transform(
+    std::cout << "rhs_temp:"<<std::endl;
+    thrust::host_vector<float> rhs_temp_h = rhs_temp;
+    for(int j = 0; j < gridHeight; ++j){
+        for(int i  =0 ; i < gridWidth ; ++i){
+            std::cout << rhs_temp_h[i + j * gridWidth] << ", ";
+        }
+        std::cout << std::endl;
+    }
+
+
+    const int result_size = thrust::count(fluidFlags.begin(), fluidFlags.end(), 1);
+    rhs.resize(result_size);
+
+    const int* flags_ptr = thrust::raw_pointer_cast(fluidFlags.data());
+    thrust::copy_if(
             thrust::device,
-            thrust::counting_iterator<int>(0),
-            thrust::counting_iterator<int>(gridWidth * gridHeight * gridDepth),
+            rhs_temp.begin(),
+            rhs_temp.end(),
+            thrust::counting_iterator<size_t>(0),
             rhs.begin(),
-            CopyFluidRHSFunctor{
-                    thrust::raw_pointer_cast(fluidNumbers.data()),
-                    thrust::raw_pointer_cast(rhs_temp.data())
-            }
+            IsSelected( flags_ptr)
     );
+
+    // Вывод результата
+    thrust::host_vector<float> rhs_h = rhs;
+    std::cout << "Copied values: ";
+    for (float val : rhs_h) {
+        std::cout << val << " ";
+    }
+    std::cout << std::endl;
+    std::cout << "----" << std::endl;
+//    thrust::transform(
+//            thrust::device,
+//            thrust::counting_iterator<int>(0),
+//            thrust::counting_iterator<int>(w_x_h_x_d),
+//            rhs.begin(),
+//            CopyFluidRHSFunctor{
+//                    thrust::raw_pointer_cast(fluidNumbers.data()),
+//                    thrust::raw_pointer_cast(rhs_temp.data())
+//            }
+//    );
 
     /* ДО (пример)
         Индексы:    [0]     [1]     [2]     [3]
@@ -1029,6 +1079,8 @@ void FluidSolver3D::constructA(
                     1.0f
             }
     );
+
+    csr_offsets.back() = csr_values.size();
 }
 
 struct CopySolutionFunctor {
@@ -1043,7 +1095,7 @@ int FluidSolver3D::pressureSolve() {
 
     // новая нумерация
     thrust::device_vector<int> fluidNumbers_d(w_x_h_x_d, -1);
-    thrust::sequence(thrust::device, fluidNumbers_d.begin(), fluidNumbers_d.end());
+    thrust::sequence(thrust::device, fluidNumbers_d.begin(), fluidNumbers_d.end()); // последовательность индексов от 0
     thrust::device_vector<int> flags(w_x_h_x_d, 0);
 
     /*ЧТО ХОТИМ СДЕЛАТЬ НИЖЕ: ВВЕСТИ НОВУЮ НУМЕРАЦИЮ.
@@ -1059,6 +1111,16 @@ int FluidSolver3D::pressureSolve() {
             flags.begin(),
             FluidFlagFunctor()
     );
+
+    std::cout << "flags:" << std::endl;
+    thrust::host_vector<float> flags_h = flags;
+    for(int j = 0; j < gridHeight; ++j){
+        for(int i = 0; i < gridWidth; ++i){
+            std::cout << flags_h[i + j*gridWidth] << ", ";
+        }
+        std::cout << std::endl;
+    }
+
 
     // с помощью префиксной суммы (не включая текущий жлемент, exclusive) получаем индексы жидких ячеек в новой нумерации (флаги нужны для получения таких сумм)
     thrust::exclusive_scan(
@@ -1077,6 +1139,7 @@ int FluidSolver3D::pressureSolve() {
             0,
             thrust::plus<int>()
     );
+    std::cout << "fluidCelssAmount = " << fluidCellsAmount << std::endl;
     if (fluidCellsAmount == 0) {
         std::cerr << "No fluid cells found!" << std::endl;
         return -1;
@@ -1084,7 +1147,25 @@ int FluidSolver3D::pressureSolve() {
 
     //  Построение правой части (RHS)
     thrust::device_vector<float> rhs_d(fluidCellsAmount, 0.0f);
-    constructRHS(rhs_d, fluidNumbers_d);
+    constructRHS(rhs_d, fluidNumbers_d, flags);
+
+    std::cout << "fluidNumbers:" << std::endl;
+    thrust::host_vector<float> fluidNumbers = fluidNumbers_d;
+    for(int j = 0; j < gridHeight; ++j){
+        for(int i = 0; i < gridWidth; ++i){
+            std::cout << fluidNumbers[i + j*gridWidth] << ", ";
+        }
+        std::cout << std::endl;
+    }
+
+    std::cout << "rhs for new system:" << std::endl;
+    thrust::host_vector<float> rhs = rhs_d;
+    for(int j = 0; j < gridHeight; ++j){
+        for(int i = 0; i < gridWidth; ++i){
+            std::cout << rhs[i + j*gridWidth] << ", ";
+        }
+        std::cout << std::endl;
+    }
 
     //  Построение матрицы A в формате CSR
     thrust::device_vector<float> csr_values;
@@ -1127,6 +1208,24 @@ int FluidSolver3D::pressureSolve() {
         cudssDestroy(handle);
         return -4;
     }
+
+//    thrust::host_vector<float> csr_vals_h = csr_values;
+//    thrust::host_vector<float> csr_cols_h = csr_columns;
+//    thrust::host_vector<float> csr_offs_h = csr_offsets;
+//
+//    for(int i = 0; i < csr_vals_h.size(); ++i){
+//        std::cout << csr_vals_h[i] << ", ";
+//    }
+//    std::cout << "\n------\n";
+//    for(int i = 0; i < csr_cols_h.size(); ++i){
+//        std::cout << csr_cols_h[i] << ", ";
+//    }
+//    std::cout << "\n------\n";
+//    for(int i = 0; i < csr_offs_h.size(); ++i){
+//        std::cout << csr_offs_h[i] << ", ";
+//    }
+//    std::cout << "\n------\n";
+//    std::cin.get();
 
     // решение Системы линейных алгебраических уравнений с разреженной матрицей
     thrust::device_vector<float> solution(fluidCellsAmount);
@@ -1175,6 +1274,20 @@ int FluidSolver3D::pressureSolve() {
     );
 
     thrust::copy(p_temp.begin(), p_temp.end(), p.device_data.begin());
+
+
+    std::cout << "----pressure 3d---" << std::endl;
+    p.host_data = p.device_data;
+    for(int k = 0; k < gridDepth; ++k){
+        for(int j = 0; j < gridHeight; ++j){
+            for(int i = 0; i < gridWidth; ++i){
+                std::cout << p.host_data[i + j*gridWidth + k * gridWidth*gridHeight] << ", ";
+            }
+            std::cout << std::endl;
+        }
+        std::cout << std::endl;
+    }
+
 
     status = cudssMatrixDestroy(A);
     status = cudssMatrixDestroy(b);
@@ -1256,6 +1369,7 @@ __global__ void applyPressureKernel3D(
             // edge of grid, keep the same velocity
         }
     }
+    //__syncthreads();
 }
 
 void FluidSolver3D::applyPressure() {
@@ -1271,6 +1385,7 @@ void FluidSolver3D::applyPressure() {
             scale,
             gridWidth, gridHeight, gridDepth
     );
+
 }
 
 __host__ void FluidSolver3D::frameStep(){
@@ -1284,8 +1399,8 @@ __host__ void FluidSolver3D::frameStep(){
 
     //applying body forces on grid (e.g. gravity force)
     applyForces();
-    //pressureSolve();
-    //applyPressure();
+    pressureSolve();
+    applyPressure();
 
     //grid velocities to particles
     gridToParticles(PIC_WEIGHT);
@@ -1304,7 +1419,7 @@ __host__ void FluidSolver3D::run(int max_steps) {
     cudaEventRecord(start, 0);
     for(int i = 0; i < max_steps; ++i){
         frameStep();
-        if(i%10 == 0){
+        if(i%1 == 0){
             h_particles = d_particles;
             Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i) + ".ply");
             std::cout << "frame = " << i/10 << "; numParticles = " << h_particles.size()<<std::endl;

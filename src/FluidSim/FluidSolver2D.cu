@@ -108,7 +108,6 @@ void FluidSolver2D::init(std::string fileName){
     std::cout <<"Number of particles is" << particles->size() << std::endl;
     Utility::saveParticlesToPLY(*particles, "InputData/particles_0.ply");
     labelGrid();
-    frameStep();
 }
 
 
@@ -660,14 +659,24 @@ int FluidSolver2D::pressureSolve() {
     CUDA_CALL_AND_CHECK(cudaMemcpy(x_values_h, x_values_d, nrhs * n * sizeof(float),
                                    cudaMemcpyDeviceToHost), "cudaMemcpy for x_values");
 
+
+    for(int j = 0; j < gridHeight; ++j){
+        for(int i = 0; i < gridWidth; ++i){
+            std::cout << rhs[i + j*gridWidth] << ", ";
+        }
+        std::cout << std::endl;
+    }
     /* Release the data allocated on the user side */
+    std::cout << "----pressure 2d---" << std::endl;
     for(int j = 0; j < gridHeight; ++j){
         for(int i = 0; i < gridWidth; ++i){
             int newFluidInd = fluidNumbers[i+ j*gridWidth];
             if(newFluidInd != -1){
                 p[i + j*gridWidth] = x_values_h[newFluidInd];
             }
+            std::cout << p[i + j*gridWidth] << ", ";
         }
+        std::cout << std::endl;
     }
 
     CUDSS_EXAMPLE_FREE;
@@ -1275,7 +1284,7 @@ void FluidSolver2D::frameStep(){
 void FluidSolver2D::run(int max_steps) {
     for(int i = 0; i < max_steps; ++i){
         frameStep();
-        if(i%10 == 0){
+        if(i%1 == 0){
             Utility::saveParticlesToPLY(*particles, "InputData/particles_" + std::to_string(i) + ".ply");
             std::cout << "frame = " << i/10 << "; numParticles = " << particles->size()<<std::endl;
         }
