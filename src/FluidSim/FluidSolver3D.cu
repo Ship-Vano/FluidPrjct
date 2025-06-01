@@ -4,7 +4,8 @@
 FluidSolver3D::FluidSolver3D(int width, int height, int depth, float dx_, float dt_){
     gridWidth = width;
     gridHeight = height;
-    w_x_h_x_d = gridWidth * gridHeight;
+    gridDepth = depth;
+    w_x_h_x_d = gridWidth * gridHeight * gridDepth;
     dx = dx_;
     dy = dx;
     dz = dx;
@@ -26,7 +27,7 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
 
     // Чтение размеров
     file >> gridWidth >> gridHeight >> gridDepth;
-
+    w_x_h_x_d = gridWidth * gridHeight * gridDepth;
     // Инициализация сеток
     labels.resize(gridWidth, gridHeight, gridDepth);
     p.resize(gridWidth, gridHeight, gridDepth);
@@ -765,43 +766,50 @@ struct RHSCalculator3D {
     const float* u, *v, *w;
     float scale;
     int W, H, D;
+    float* rhs_temp;
 
-    __host__ __device__
-    float operator()(int idx) const {
+    __device__ void operator()(int idx) const {
         int i = idx % W;
         int j = (idx / W) % H;
         int k = idx / (W * H);
 
-        if (labels[idx] != Utility::FLUID) return 0.0f;
+        if (labels[idx] != Utility::FLUID) return;
 
         float div =
-                u[i+1 + j*(W+1) + k*(W+1)*H] - u[i + j*(W+1) + k*(W+1)*H] +
+                u[(i+1) + j*(W+1) + k*(W+1)*H] - u[i + j*(W+1) + k*(W+1)*H] +
                 v[i + (j+1)*W + k*W*(H+1)] - v[i + j*W + k*W*(H+1)] +
                 w[i + j*W + (k+1)*W*H] - w[i + j*W + k*W*H];
 
         float rhs_val = -scale * div;
 
-        // Solid boundary conditions
-        if (i-1 >= 0 && labels[idx - 1] == Utility::SOLID)
+        // Solid boundaries
+        if (i-1 >= 0 && labels[idx-1] == Utility::SOLID)
             rhs_val -= scale * (u[i + j*(W+1) + k*(W+1)*H] - 0.0f);
-        if (i+1 < W && labels[idx + 1] == Utility::SOLID)
-            rhs_val += scale * (u[i+1 + j*(W+1) + k*(W+1)*H] - 0.0f);
-
-        if (j-1 >= 0 && labels[idx - W] == Utility::SOLID)
+        if (i+1 < W && labels[idx+1] == Utility::SOLID)
+            rhs_val += scale * (u[(i+1) + j*(W+1) + k*(W+1)*H] - 0.0f);
+        if (j-1 >= 0 && labels[idx-W] == Utility::SOLID)
             rhs_val -= scale * (v[i + j*W + k*W*(H+1)] - 0.0f);
-        if (j+1 < H && labels[idx + W] == Utility::SOLID)
+        if (j+1 < H && labels[idx+W] == Utility::SOLID)
             rhs_val += scale * (v[i + (j+1)*W + k*W*(H+1)] - 0.0f);
-
-        if (k-1 >= 0 && labels[idx - W*H] == Utility::SOLID)
+        if (k-1 >= 0 && labels[idx-W*H] == Utility::SOLID)
             rhs_val -= scale * (w[i + j*W + k*W*H] - 0.0f);
-        if (k+1 < D && labels[idx + W*H] == Utility::SOLID)
+        if (k+1 < D && labels[idx+W*H] == Utility::SOLID)
             rhs_val += scale * (w[i + j*W + (k+1)*W*H] - 0.0f);
 
-        return rhs_val;
+        rhs_temp[idx] = rhs_val;
     }
 };
 
+// Копируем только FLUID ячейки
+struct CopyFluidRHSFunctor {
+    const int* fluidNumbers;
+    const float* rhs_temp;
 
+    __device__ float operator()(int idx) const {
+        int fnum = fluidNumbers[idx];
+        return (fnum >= 0) ? rhs_temp[idx] : 0.0f;
+    }
+};
 
 struct FluidFlagFunctor {
     __host__ __device__
@@ -823,24 +831,36 @@ struct FluidCellPredicate {
 };
 
 
-void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs) {
+void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs, const thrust::device_vector<int>& fluidNumbers) {
 
     float scale = (FLUID_DENSITY * dx) / dt;
-    int totalCells = gridWidth * gridHeight * gridDepth;
+    int totalCells = w_x_h_x_d;
 
-    thrust::device_vector<float> rhs_temp(totalCells);
+    thrust::device_vector<float> rhs_temp(totalCells, 0.0f);
 
-    thrust::transform(
+    thrust::for_each_n(
+            thrust::device,
             thrust::counting_iterator<int>(0),
-            thrust::counting_iterator<int>(totalCells),
-            rhs_temp.begin(),
+            gridWidth * gridHeight * gridDepth,
             RHSCalculator3D{
                     thrust::raw_pointer_cast(labels.device_ptr()),
                     thrust::raw_pointer_cast(u.device_ptr()),
                     thrust::raw_pointer_cast(v.device_ptr()),
                     thrust::raw_pointer_cast(w.device_ptr()),
                     scale,
-                    gridWidth, gridHeight, gridDepth
+                    gridWidth, gridHeight, gridDepth,
+                    thrust::raw_pointer_cast(rhs_temp.data())
+            }
+    );
+
+    thrust::transform(
+            thrust::device,
+            thrust::counting_iterator<int>(0),
+            thrust::counting_iterator<int>(gridWidth * gridHeight * gridDepth),
+            rhs.begin(),
+            CopyFluidRHSFunctor{
+                    thrust::raw_pointer_cast(fluidNumbers.data()),
+                    thrust::raw_pointer_cast(rhs_temp.data())
             }
     );
 
@@ -854,39 +874,177 @@ void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs) {
         fluidCellsAmount = 2
      * */
 
-    //  Подсчитываем количество жидких ячеекisFLuid isFluid;
-
-    fluidCellsAmount = thrust::transform_reduce(
-            thrust::device,
-            labels.device_data.begin(),
-            labels.device_data.end(),
-            FluidFlagFunctor(),  // Преобразует метку в 1/0
-            0,                       // Начальное значение суммы
-            thrust::plus<int>()      // Операция сложения
-    );
-
-    rhs.resize(fluidCellsAmount);
-
-    // Compact to fluid cells only
-    auto new_end = thrust::copy_if(
-            rhs_temp.begin(), rhs_temp.end(),
-            thrust::counting_iterator<int>(0),
-            rhs.begin(),
-            FluidCellPredicate{
-                    thrust::raw_pointer_cast(labels.device_ptr()),
-                    Utility::FLUID
-            }
-    );
-    //fluidCellsAmount = thrust::distance(rhs.begin(), new_end);
 }
 
+struct MatrixBuilder3D {
+    int W, H, D;
+    const int* labels;
+    const int* fluidNumbers;
+    int* nnz_per_row;
 
+    __device__ void operator()(int idx) const {
+        int i = idx % W;
+        int j = (idx / W) % H;
+        int k = idx / (W * H);
+
+        if (labels[idx] != Utility::FLUID) return;
+
+        int row = fluidNumbers[idx];
+        int count = 1; // Диагональный элемент
+
+        // 6 направлений соседей
+        const int offsets[6][3] = {
+                {1,0,0}, {-1,0,0},
+                {0,1,0}, {0,-1,0},
+                {0,0,1}, {0,0,-1}
+        };
+
+        for (int n = 0; n < 6; n++) {
+            int ni = i + offsets[n][0];
+            int nj = j + offsets[n][1];
+            int nk = k + offsets[n][2];
+
+            if (ni >= 0 && ni < W && nj >= 0 && nj < H && nk >= 0 && nk < D) {
+                int nidx = ni + nj * W + nk * W * H;
+                if (labels[nidx] == Utility::FLUID && fluidNumbers[nidx] > row) {
+                    count++;
+                }
+            }
+        }
+        nnz_per_row[row] = count;
+    }
+};
+
+struct MatrixFiller3D {
+    int W, H, D;
+    const int* labels;
+    const int* fluidNumbers;
+    const int* csr_offsets;
+    float* csr_values;
+    int* csr_columns;
+    float scale;
+
+    __device__ void operator()(int idx) const {
+        int i = idx % W;
+        int j = (idx / W) % H;
+        int k = idx / (W * H);
+
+        if (labels[idx] != Utility::FLUID) return;
+
+        int row = fluidNumbers[idx];
+        int pos = csr_offsets[row];
+        float diagVal = 0.0f;
+
+        // Диагональный элемент
+        csr_values[pos] = diagVal;
+        csr_columns[pos] = row;
+        pos++;
+
+        // Обработка соседей
+        const int offsets[6][3] = {
+                {1,0,0}, {-1,0,0},
+                {0,1,0}, {0,-1,0},
+                {0,0,1}, {0,0,-1}
+        };
+
+        for (int n = 0; n < 6; n++) {
+            int ni = i + offsets[n][0];
+            int nj = j + offsets[n][1];
+            int nk = k + offsets[n][2];
+
+            if (ni >= 0 && ni < W && nj >= 0 && nj < H && nk >= 0 && nk < D) {
+                int nidx = ni + nj * W + nk * W * H;
+
+                if (labels[nidx] == Utility::FLUID) {
+                    int col = fluidNumbers[nidx];
+
+                    // Только верхний треугольник
+                    if (col > row) {
+                        csr_values[pos] = -scale;
+                        csr_columns[pos] = col;
+                        pos++;
+                    }
+                    diagVal += scale;
+                }
+                else if (labels[nidx] != Utility::SOLID) {
+                    diagVal += scale;
+                }
+            }
+        }
+
+        // Обновляем диагональ
+        csr_values[csr_offsets[row]] = diagVal;
+    }
+};
+
+void FluidSolver3D::constructA(
+        thrust::device_vector<float>& csr_values,
+        thrust::device_vector<int>& csr_columns,
+        thrust::device_vector<int>& csr_offsets,
+        thrust::device_vector<int> fluidNumbers
+) {
+    thrust::device_vector<int> nnz_per_row(fluidCellsAmount, 0);
+
+    // Фаза 1: Подсчет ненулевых элементов
+    thrust::for_each_n(
+            thrust::device,
+            thrust::counting_iterator<int>(0),
+            gridWidth * gridHeight * gridDepth,
+            MatrixBuilder3D{
+                    gridWidth, gridHeight, gridDepth,
+                    thrust::raw_pointer_cast(labels.device_ptr()),
+                    thrust::raw_pointer_cast(fluidNumbers.data()),
+                    thrust::raw_pointer_cast(nnz_per_row.data())
+            }
+    );
+
+    // Строим смещения
+    thrust::exclusive_scan(
+            thrust::device,
+            nnz_per_row.begin(), nnz_per_row.end(),
+            csr_offsets.begin()
+    );
+
+    // Общее количество ненулевых элементов
+    int total_nnz = thrust::reduce(
+            thrust::device,
+            nnz_per_row.begin(), nnz_per_row.end()
+    );
+
+    csr_values.resize(total_nnz);
+    csr_columns.resize(total_nnz);
+
+    // Фаза 2: Заполнение матрицы
+    thrust::for_each_n(
+            thrust::device,
+            thrust::counting_iterator<int>(0),
+            gridWidth * gridHeight * gridDepth,
+            MatrixFiller3D{
+                    gridWidth, gridHeight, gridDepth,
+                    thrust::raw_pointer_cast(labels.device_ptr()),
+                    thrust::raw_pointer_cast(fluidNumbers.data()),
+                    thrust::raw_pointer_cast(csr_offsets.data()),
+                    thrust::raw_pointer_cast(csr_values.data()),
+                    thrust::raw_pointer_cast(csr_columns.data()),
+                    1.0f
+            }
+    );
+}
+
+struct CopySolutionFunctor {
+    __device__ float operator()(int fluidIdx, float solValue) const {
+        return (fluidIdx >= 0) ? solValue : 0.0f;
+    }
+};
 
 int FluidSolver3D::pressureSolve() {
+
+    w_x_h_x_d = gridWidth * gridHeight * gridDepth;
+
     // новая нумерация
-    thrust::device_vector<int> fluidNumbers_d(gridWidth * gridHeight * gridDepth, -1);
+    thrust::device_vector<int> fluidNumbers_d(w_x_h_x_d, -1);
     thrust::sequence(thrust::device, fluidNumbers_d.begin(), fluidNumbers_d.end());
-    thrust::device_vector<int> flags(labels.size());
+    thrust::device_vector<int> flags(w_x_h_x_d, 0);
 
     /*ЧТО ХОТИМ СДЕЛАТЬ НИЖЕ: ВВЕСТИ НОВУЮ НУМЕРАЦИЮ.
      * Ячейка	Метка	flags	fluidNumbers_d
@@ -897,32 +1055,132 @@ int FluidSolver3D::pressureSolve() {
     thrust::transform(
             thrust::device,
             labels.device_ptr(),
-            labels.device_ptr() + labels.size(),
+            labels.device_ptr() + w_x_h_x_d,
             flags.begin(),
             FluidFlagFunctor()
     );
 
+    // с помощью префиксной суммы (не включая текущий жлемент, exclusive) получаем индексы жидких ячеек в новой нумерации (флаги нужны для получения таких сумм)
     thrust::exclusive_scan(
             thrust::device,
             flags.begin(), flags.end(),
             fluidNumbers_d.begin()
     );
 
-    // Construct RHS and matrix
-    thrust::device_vector<float> rhs_d(fluidCellsAmount);
+    //std::cout << "last number = " << fluidNumbers_d[w_x_h_x_d-1] << std::endl;
+    //fluidCellsAmount = fluidNumbers_d[w_x_h_x_d-1];
+    //  Подсчет количества жидких ячеек
+    fluidCellsAmount = thrust::reduce(
+            thrust::device,
+            flags.begin(),
+            flags.end(),
+            0,
+            thrust::plus<int>()
+    );
+    if (fluidCellsAmount == 0) {
+        std::cerr << "No fluid cells found!" << std::endl;
+        return -1;
+    }
+
+    //  Построение правой части (RHS)
+    thrust::device_vector<float> rhs_d(fluidCellsAmount, 0.0f);
+    constructRHS(rhs_d, fluidNumbers_d);
+
+    //  Построение матрицы A в формате CSR
     thrust::device_vector<float> csr_values;
     thrust::device_vector<int> csr_columns;
-    thrust::device_vector<int> csr_offsets(fluidCellsAmount+1);
+    thrust::device_vector<int> csr_offsets(fluidCellsAmount + 1, 0);
 
-    constructRHS(rhs_d);
-//    constructA(csr_values, csr_columns, csr_offsets);
-//
-//    // Solve with cuDSS (similar to 2D version)
-//    // ... [cuDSS setup and solve] ...
-//
-//    // Copy pressure back to grid
-//    thrust::copy(x_solution.begin(), x_solution.end(), p.device_ptr());
-    return 1;
+    constructA(csr_values, csr_columns, csr_offsets, fluidNumbers_d);
+
+    if (csr_values.empty()) {
+        std::cerr << "Matrix construction failed!" << std::endl;
+        return -2;
+    }
+
+    cudssHandle_t handle;
+    cudssStatus_t status = cudssCreate(&handle);
+    if (status != CUDSS_STATUS_SUCCESS) {
+        std::cerr << "cuDSS init failed: " << status << std::endl;
+        return -3;
+    }
+
+    cudssMatrix_t A;
+    cudssMatrixType_t mtype = CUDSS_MTYPE_SPD;// Symmetric Positive Definite
+    cudssMatrixViewType_t mview = CUDSS_MVIEW_UPPER;// Upper triangular stored
+    cudssIndexBase_t base = CUDSS_BASE_ZERO;
+    int nnz = csr_values.size();
+
+    status = cudssMatrixCreateCsr(
+            &A,
+            fluidCellsAmount, fluidCellsAmount, nnz,
+            thrust::raw_pointer_cast(csr_offsets.data()),
+            nullptr,
+            thrust::raw_pointer_cast(csr_columns.data()),
+            thrust::raw_pointer_cast(csr_values.data()),
+            CUDA_R_32I, CUDA_R_32F,
+            mtype, mview, base
+    );
+
+    if (status != CUDSS_STATUS_SUCCESS) {
+        std::cerr << "Matrix creation failed: " << status << std::endl;
+        cudssDestroy(handle);
+        return -4;
+    }
+
+    // решение Системы линейных алгебраических уравнений с разреженной матрицей
+    thrust::device_vector<float> solution(fluidCellsAmount);
+
+
+    cudssMatrix_t x, b;
+
+    status = cudssMatrixCreateDn(
+            &b, fluidCellsAmount, 1, fluidCellsAmount,
+            thrust::raw_pointer_cast(rhs_d.data()),
+            CUDA_R_32F, CUDSS_LAYOUT_COL_MAJOR
+    );
+
+    status = cudssMatrixCreateDn(
+            &x, fluidCellsAmount, 1, fluidCellsAmount,
+            thrust::raw_pointer_cast(solution.data()),
+            CUDA_R_32F, CUDSS_LAYOUT_COL_MAJOR
+    );
+
+    // Решение системы
+    cudssConfig_t solverConfig;
+    cudssData_t solverData;
+    cudssConfigCreate(&solverConfig);
+    cudssDataCreate(handle, &solverData);
+
+    // Анализ
+    status = cudssExecute(handle, CUDSS_PHASE_ANALYSIS,
+                          solverConfig, solverData, A, x, b);
+
+    // Факторизация
+    status = cudssExecute(handle, CUDSS_PHASE_FACTORIZATION,
+                          solverConfig, solverData, A, x, b);
+
+    // Решение
+    status = cudssExecute(handle, CUDSS_PHASE_SOLVE,
+                          solverConfig, solverData, A, x, b);
+
+    //  Копирование решения в сетку давления
+    thrust::device_vector<float> p_temp(w_x_h_x_d, 0.0f);
+    thrust::transform(
+            thrust::device,
+            fluidNumbers_d.begin(), fluidNumbers_d.end(),
+            solution.begin(),
+            p_temp.begin(),
+            CopySolutionFunctor()
+    );
+
+    thrust::copy(p_temp.begin(), p_temp.end(), p.device_data.begin());
+
+    status = cudssMatrixDestroy(A);
+    status = cudssMatrixDestroy(b);
+    status = cudssMatrixDestroy(x);
+
+    return 0;
 }
 
 void FluidSolver3D::applyPressure() {

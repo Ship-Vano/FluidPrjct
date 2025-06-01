@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 project(FluidGPU LANGUAGES CXX CUDA)
 
+# Включаем расширенные лямбды для CUDA
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extended-lambda")
+
 # Set CUDA paths explicitly for Arch Linux's non-standard location
 set(CMAKE_CUDA_ARCHITECTURES "native")
 
@@ -46,4 +49,6 @@ target_link_libraries(FluidGPU PRIVATE
 set_target_properties(FluidGPU PROPERTIES
         CUDA_STANDARD 17
         CUDA_SEPARABLE_COMPILATION ON
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
 )

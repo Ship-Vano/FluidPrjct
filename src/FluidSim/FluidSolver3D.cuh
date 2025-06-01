@@ -63,7 +63,7 @@ private:
 
     // new renumbering of fluid cells for pressure solve fluidNumbers(i + j* gridWidth + k * gridWidth * gridHeight) = new_index in A indexing
     // Important! new_ind = -1 => a cell is NOT a FLUID one.
-    Utility::Grid3D<int>  fluidNumbers;
+    //Utility::Grid3D<int>  fluidNumbers; as a temp var now
     int fluidCellsAmount;
 
     //Simulation parameters
@@ -114,8 +114,8 @@ private:
     // helpers
     bool isFluid(int i, int j, int k);
     bool isCellValid(int x, int y, int z);
-    void constructRHS(thrust::device_vector<float>& rhs);
-    void constructA(std::vector<float>& csr_values, std::vector<int>& csr_columns, std::vector<int>& csr_offsets);
+    void constructRHS(thrust::device_vector<float>& rhs, const thrust::device_vector<int>& fluidNumbers);
+    void constructA(thrust::device_vector<float>& csr_values, thrust::device_vector<int>& csr_columns, thrust::device_vector<int>& csr_offsets, thrust::device_vector<int> fluidNumbers);
     float2 interpVel(std::vector<float>& uGrid, std::vector<float>& vGrid, std::vector<float>& wGrid, float3 pos);
     bool projectParticle(Utility::Particle3D* particle, float max_h);
     void RK3(Utility::Particle3D *particle, float3 initVel, float dt, std::vector<float>& uGrid, std::vector<float>& vGrid, std::vector<float>& wGrid);
