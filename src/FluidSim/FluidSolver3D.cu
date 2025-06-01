@@ -1083,12 +1083,6 @@ void FluidSolver3D::constructA(
     csr_offsets.back() = csr_values.size();
 }
 
-/**@deprecated*/
-struct CopySolutionFunctor {
-    __device__ float operator()(int fluidIdx, float solValue) const {
-        return (fluidIdx >= 0) ? solValue : 0.0f;
-    }
-};
 
 struct GlobalToLocal {
     const int* flags;       // Указатель на вектор флагов
@@ -1306,17 +1300,17 @@ int FluidSolver3D::pressureSolve() {
     thrust::copy(p_temp.begin(), p_temp.end(), p.device_data.begin());
 
 
-    std::cout << "----pressure 3d---" << std::endl;
-    p.host_data = p.device_data;
-    for(int k = 0; k < gridDepth; ++k){
-        for(int j = 0; j < gridHeight; ++j){
-            for(int i = 0; i < gridWidth; ++i){
-                std::cout << p.host_data[i + j*gridWidth + k * gridWidth*gridHeight] << ", ";
-            }
-            std::cout << std::endl;
-        }
-        std::cout << std::endl;
-    }
+//    std::cout << "----pressure 3d---" << std::endl;
+//    p.host_data = p.device_data;
+//    for(int k = 0; k < gridDepth; ++k){
+//        for(int j = 0; j < gridHeight; ++j){
+//            for(int i = 0; i < gridWidth; ++i){
+//                std::cout << p.host_data[i + j*gridWidth + k * gridWidth*gridHeight] << ", ";
+//            }
+//            std::cout << std::endl;
+//        }
+//        std::cout << std::endl;
+//    }
 
 
     status = cudssMatrixDestroy(A);
@@ -1326,96 +1320,165 @@ int FluidSolver3D::pressureSolve() {
     return 0;
 }
 
-__global__ void applyPressureKernel3D(
-        float* u, float* v, float* w,
-        const float* p,
-        const int* labels,
-        float scale,
-        int W, int H, int D
-) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int j = blockIdx.y * blockDim.y + threadIdx.y;
-    int k = blockIdx.z * blockDim.z + threadIdx.z;
+struct UFunctor {
+    float* u;
+    const float* p;
+    const int* labels;
+    float scale;
+    int W, H, D;
+    float VEL_UNKNOWN;
 
-    // Update U component
-    if (i < W+1 && j < H && k < D) {
-        int idx = i + j*(W+1) + k*(W+1)*H;
+    UFunctor(float* u_, const float* p_, const int* labels_, float scale_,
+             int W_, int H_, int D_, float vel_unknown)
+            : u(u_), p(p_), labels(labels_), scale(scale_),
+              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
+
+    __host__ __device__
+    void operator()(int idx) const {
+        int k = idx / ((W+1) * H);
+        int j = (idx % ((W+1) * H)) / (W+1);
+        int i = (idx % ((W+1) * H)) % (W+1);
+
         if (i > 0 && i < W) {
-            int left = (i-1) + j*W + k*W*H;//cell-centered index
-            int right = i + j*W + k*W*H;//cell-centered index
-            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID){
-                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID){
-                    // TODO add solid velocities
+            int left = (i-1) + j*W + k*W*H;
+            int right = i + j*W + k*W*H;
+
+            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID) {
+                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID) {
                     u[idx] = 0.0f;
-                } else{
+                } else {
                     u[idx] -= scale * (p[right] - p[left]);
                 }
-            }else {
+            } else {
                 u[idx] = VEL_UNKNOWN;
             }
-        } else{
-            // edge of grid, keep the same velocity
         }
     }
+};
 
-    // v компонента
-    if (i < W && j < H+1 && k < D) {
-        int idx = i + j*(W) + k*(W)*(H+1);
+struct VFunctor {
+    float* v;
+    const float* p;
+    const int* labels;
+    float scale;
+    int W, H, D;
+    float VEL_UNKNOWN;
+
+    VFunctor(float* v_, const float* p_, const int* labels_, float scale_,
+             int W_, int H_, int D_, float vel_unknown)
+            : v(v_), p(p_), labels(labels_), scale(scale_),
+              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
+
+    __host__ __device__
+    void operator()(int idx) const {
+        int k = idx / (W * (H+1));
+        int j = (idx % (W * (H+1))) / W;
+        int i = (idx % (W * (H+1))) % W;
+
         if (j > 0 && j < H) {
-            int left = i + (j-1)*W + k*W*H;//cell-centered index
-            int right = i + j*W + k*W*H;//cell-centered index
-            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID){
-                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID){
-                    // TODO add solid velocities
+            int left = i + (j-1)*W + k*W*H;
+            int right = i + j*W + k*W*H;
+
+            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID) {
+                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID) {
                     v[idx] = 0.0f;
-                } else{
+                } else {
                     v[idx] -= scale * (p[right] - p[left]);
                 }
-            }else {
+            } else {
                 v[idx] = VEL_UNKNOWN;
             }
-        } else{
-            // edge of grid, keep the same velocity
         }
     }
+};
 
-    // w компонента
-    if (i < W && j < H && k < D+1) {
-        int idx = i + j*(W) + k*(W)*(H);
+struct WFunctor {
+    float* w;
+    const float* p;
+    const int* labels;
+    float scale;
+    int W, H, D;
+    float VEL_UNKNOWN;
+
+    WFunctor(float* w_, const float* p_, const int* labels_, float scale_,
+             int W_, int H_, int D_, float vel_unknown)
+            : w(w_), p(p_), labels(labels_), scale(scale_),
+              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
+
+    __host__ __device__
+    void operator()(int idx) const {
+        int k = idx / (W * H);
+        int j = (idx % (W * H)) / W;
+        int i = (idx % (W * H)) % W;
+
         if (k > 0 && k < D) {
-            int left = i + j*W + (k-1)*W*H;//cell-centered index
-            int right = i + j*W + k*W*H;//cell-centered index
-            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID){
-                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID){
-                    // TODO add solid velocities
+            int left = i + j*W + (k-1)*W*H;
+            int right = i + j*W + k*W*H;
+
+            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID) {
+                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID) {
                     w[idx] = 0.0f;
-                } else{
+                } else {
                     w[idx] -= scale * (p[right] - p[left]);
                 }
-            }else {
+            } else {
                 w[idx] = VEL_UNKNOWN;
             }
-        } else{
-            // edge of grid, keep the same velocity
         }
     }
-    //__syncthreads();
-}
+};
 
 void FluidSolver3D::applyPressure() {
     float scale = dt / (FLUID_DENSITY * dx);
-    dim3 gridSize((gridWidth+7)/8, (gridHeight+7)/8, (gridDepth+7)/8);
+    float vel_unknown = (float)VEL_UNKNOWN; // Предполагается, что VEL_UNKNOWN определен
 
-    applyPressureKernel3D<<<gridSize, blockSize3D>>>(
-            thrust::raw_pointer_cast(u.device_ptr()),
-            thrust::raw_pointer_cast(v.device_ptr()),
-            thrust::raw_pointer_cast(w.device_ptr()),
-            thrust::raw_pointer_cast(p.device_ptr()),
-            thrust::raw_pointer_cast(labels.device_ptr()),
-            scale,
-            gridWidth, gridHeight, gridDepth
+    // Обработка u-компоненты
+    int u_size = (gridWidth+1) * gridHeight * gridDepth;
+    thrust::for_each(
+            thrust::device,
+            thrust::make_counting_iterator(0),
+            thrust::make_counting_iterator(u_size),
+            UFunctor(
+                    u.device_ptr(),
+                    p.device_ptr(),
+                    labels.device_ptr(),
+                    scale,
+                    gridWidth, gridHeight, gridDepth,
+                    vel_unknown
+            )
     );
 
+    // Обработка v-компоненты
+    int v_size = gridWidth * (gridHeight+1) * gridDepth;
+    thrust::for_each(
+            thrust::device,
+            thrust::make_counting_iterator(0),
+            thrust::make_counting_iterator(v_size),
+            VFunctor(
+                    v.device_ptr(),
+                    p.device_ptr(),
+                    labels.device_ptr(),
+                    scale,
+                    gridWidth, gridHeight, gridDepth,
+                    vel_unknown
+            )
+    );
+
+    // Обработка w-компоненты
+    int w_size = gridWidth * gridHeight * (gridDepth+1);
+    thrust::for_each(
+            thrust::device,
+            thrust::make_counting_iterator(0),
+            thrust::make_counting_iterator(w_size),
+            WFunctor(
+                    w.device_ptr(),
+                    p.device_ptr(),
+                    labels.device_ptr(),
+                    scale,
+                    gridWidth, gridHeight, gridDepth,
+                    vel_unknown
+            )
+    );
 }
 
 __host__ void FluidSolver3D::frameStep(){
@@ -1430,7 +1493,7 @@ __host__ void FluidSolver3D::frameStep(){
     //applying body forces on grid (e.g. gravity force)
     applyForces();
     pressureSolve();
-    applyPressure();
+    //applyPressure();
 
     //grid velocities to particles
     gridToParticles(PIC_WEIGHT);
