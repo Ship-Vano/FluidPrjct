@@ -96,7 +96,7 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
     // Инициализация частиц
     seedParticles(PARTICLES_PER_CELL);
     std::cout <<"Number of particles is" << h_particles.size() << std::endl;
-    Utility::save3dParticlesToPLY(h_particles, "InputData/particles_0.ply");
+    Utility::save3dParticlesToPLY(h_particles, "InputData/particles_-1.ply");
 }
 
 __host__ void FluidSolver3D::seedParticles(int particlesPerCell){
@@ -1183,8 +1183,94 @@ int FluidSolver3D::pressureSolve() {
     return 0;
 }
 
-void FluidSolver3D::applyPressure() {
+__global__ void applyPressureKernel3D(
+        float* u, float* v, float* w,
+        const float* p,
+        const int* labels,
+        float scale,
+        int W, int H, int D
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int k = blockIdx.z * blockDim.z + threadIdx.z;
 
+    // Update U component
+    if (i < W+1 && j < H && k < D) {
+        int idx = i + j*(W+1) + k*(W+1)*H;
+        if (i > 0 && i < W) {
+            int left = (i-1) + j*W + k*W*H;//cell-centered index
+            int right = i + j*W + k*W*H;//cell-centered index
+            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID){
+                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID){
+                    // TODO add solid velocities
+                    u[idx] = 0.0f;
+                } else{
+                    u[idx] -= scale * (p[right] - p[left]);
+                }
+            }else {
+                u[idx] = VEL_UNKNOWN;
+            }
+        } else{
+            // edge of grid, keep the same velocity
+        }
+    }
+
+    // v компонента
+    if (i < W && j < H+1 && k < D) {
+        int idx = i + j*(W) + k*(W)*(H+1);
+        if (j > 0 && j < H) {
+            int left = i + (j-1)*W + k*W*H;//cell-centered index
+            int right = i + j*W + k*W*H;//cell-centered index
+            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID){
+                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID){
+                    // TODO add solid velocities
+                    v[idx] = 0.0f;
+                } else{
+                    v[idx] -= scale * (p[right] - p[left]);
+                }
+            }else {
+                v[idx] = VEL_UNKNOWN;
+            }
+        } else{
+            // edge of grid, keep the same velocity
+        }
+    }
+
+    // w компонента
+    if (i < W && j < H && k < D+1) {
+        int idx = i + j*(W) + k*(W)*(H);
+        if (k > 0 && k < D) {
+            int left = i + j*W + (k-1)*W*H;//cell-centered index
+            int right = i + j*W + k*W*H;//cell-centered index
+            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID){
+                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID){
+                    // TODO add solid velocities
+                    w[idx] = 0.0f;
+                } else{
+                    w[idx] -= scale * (p[right] - p[left]);
+                }
+            }else {
+                w[idx] = VEL_UNKNOWN;
+            }
+        } else{
+            // edge of grid, keep the same velocity
+        }
+    }
+}
+
+void FluidSolver3D::applyPressure() {
+    float scale = dt / (FLUID_DENSITY * dx);
+    dim3 gridSize((gridWidth+7)/8, (gridHeight+7)/8, (gridDepth+7)/8);
+
+    applyPressureKernel3D<<<gridSize, blockSize3D>>>(
+            thrust::raw_pointer_cast(u.device_ptr()),
+            thrust::raw_pointer_cast(v.device_ptr()),
+            thrust::raw_pointer_cast(w.device_ptr()),
+            thrust::raw_pointer_cast(p.device_ptr()),
+            thrust::raw_pointer_cast(labels.device_ptr()),
+            scale,
+            gridWidth, gridHeight, gridDepth
+    );
 }
 
 __host__ void FluidSolver3D::frameStep(){
@@ -1198,15 +1284,13 @@ __host__ void FluidSolver3D::frameStep(){
 
     //applying body forces on grid (e.g. gravity force)
     applyForces();
+    //pressureSolve();
+    //applyPressure();
 
     //grid velocities to particles
     gridToParticles(PIC_WEIGHT);
 
     advectParticles(ADVECT_MAX);
-
-    pressureSolve();
-//    applyPressure();
-
 
 }
 

@@ -693,7 +693,7 @@ void FluidSolver2D::applyPressure() {
                     u[i + j*(gridWidth+1)] = VEL_UNKNOWN;
                 }
             } else {
-                // edge of grid, keep the same velocity
+
             }
 
             // update v

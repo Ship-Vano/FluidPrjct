@@ -13,7 +13,7 @@ int main(){
     float dt = 0.01f;
     float dx = 0.5f;
 
-    FluidSolver3D solver(50, 50, 50, dx, dt);
+    FluidSolver3D solver(35, 35, 35, dx, dt);
     solver.PIC_WEIGHT = (6.0f * dt)/(dx*dx);
     std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
     solver.init("InputData/labels_3d_sphere.txt");
