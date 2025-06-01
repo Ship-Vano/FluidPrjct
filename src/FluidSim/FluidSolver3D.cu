@@ -143,7 +143,7 @@ __host__ void FluidSolver3D::seedParticles(int particlesPerCell){
                 }
 
                 // Равномерное распределение частиц по субрегионам
-                for (int p = 0; p < particlesPerCell; ++p) {
+                for (int pind = 0; pind < particlesPerCell; ++pind) {
                     // Случайный выбор субрегиона для каждой частицы
                     int subCellIdx = subCellDist(gen);
 
@@ -264,9 +264,9 @@ struct AccumulateVelocities {
 
     __device__
     void operator()(int pidx) const {
-        Utility::Particle3D p = particles[pidx];
-        float3 pos = p.pos;
-        float3 vel = p.vel;
+        Utility::Particle3D particle = particles[pidx];
+        float3 pos = particle.pos;
+        float3 vel = particle.vel;
 
         // Для u-компоненты (грани по X)
         for (int j_offset = 0; j_offset < 2; j_offset++) {
@@ -622,7 +622,7 @@ float3 interpVelDevice3D(const float* uGrid, const float* vGrid, const float* wG
 }
 
 __device__
-bool projectParticleDevice3D(Utility::Particle3D &p,
+bool projectParticleDevice3D(Utility::Particle3D &particle,
                             const int* labels,
                             int W,int H,int D, float dx)
 {
@@ -634,11 +634,11 @@ bool projectParticleDevice3D(Utility::Particle3D &p,
     };
 
     // текущая ячейка
-    int cx = int(floorf(p.pos.x/dx));
-    int cy = int(floorf(p.pos.y/dx));
-    int cz = int(floorf(p.pos.z/dx));
+    int cx = int(floorf(particle.pos.x/dx));
+    int cy = int(floorf(particle.pos.y/dx));
+    int cz = int(floorf(particle.pos.z/dx));
 
-    float3 bestPos = p.pos;
+    float3 bestPos = particle.pos;
     float  bestD   = 1e10f;
     bool   found   = false;
 
@@ -658,9 +658,9 @@ bool projectParticleDevice3D(Utility::Particle3D &p,
                 (ny+0.5f)*dx,
                 (nz+0.5f)*dx
             );
-            float d = sqrtf((posC.x-p.pos.x)*(posC.x-p.pos.x)
-                        + (posC.y-p.pos.y)*(posC.y-p.pos.y)
-                        + (posC.z-p.pos.z)*(posC.z-p.pos.z));
+            float d = sqrtf((posC.x-particle.pos.x)*(posC.x-particle.pos.x)
+                        + (posC.y-particle.pos.y)*(posC.y-particle.pos.y)
+                        + (posC.z-particle.pos.z)*(posC.z-particle.pos.z));
             if(d < bestD){
                 bestD = d;
                 bestPos = posC;
@@ -672,9 +672,9 @@ bool projectParticleDevice3D(Utility::Particle3D &p,
     if(!found) return false;
 
     // сдвигаем на 1.0*(bestPos - p.pos)
-    p.pos.x = bestPos.x;
-    p.pos.y = bestPos.y;
-    p.pos.z = bestPos.z;
+    particle.pos.x = bestPos.x;
+    particle.pos.y = bestPos.y;
+    particle.pos.z = bestPos.z;
     return true;
 }
 
@@ -696,13 +696,13 @@ struct AdvectParticlesFunctor {
         labels(_labels) {}
 
     __device__ Utility::Particle3D operator()(const Utility::Particle3D& pin) const {
-        Utility::Particle3D p = pin;
+        Utility::Particle3D particle = pin;
         float subT = 0.0f;
         bool finished = false;
         int iter = 0;
         while (!finished && iter++ < 100) {
             // 1) Интерполируем скорость
-            float3 vel = interpVelDevice3D(u,v,w, W,H,D, dx, p.pos);
+            float3 vel = interpVelDevice3D(u,v,w, W,H,D, dx, particle.pos);
 
             // 2) Считаем dT
             float speed = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z) + 1e-37f;
@@ -715,29 +715,29 @@ struct AdvectParticlesFunctor {
             }
 
             // 3) Явный Эйлер
-            p.pos.x += vel.x * dT;
-            p.pos.y += vel.y * dT;
-            p.pos.z += vel.z * dT;
+            particle.pos.x += vel.x * dT;
+            particle.pos.y += vel.y * dT;
+            particle.pos.z += vel.z * dT;
             subT += dT;
 
             // 4) Границы и NaN
-            if (p.pos.x < 0 || p.pos.y < 0 || p.pos.z < 0 ||
-                isnan(p.pos.x) || isnan(p.pos.y) || isnan(p.pos.z)) {
+            if (particle.pos.x < 0 || particle.pos.y < 0 || particle.pos.z < 0 ||
+                isnan(particle.pos.x) || isnan(particle.pos.y) || isnan(particle.pos.z)) {
                 break;
             }
 
             // 5) Попал в SOLID?
-            int cx = int(floorf(p.pos.x/dx));
-            int cy = int(floorf(p.pos.y/dx));
-            int cz = int(floorf(p.pos.z/dx));
+            int cx = int(floorf(particle.pos.x/dx));
+            int cy = int(floorf(particle.pos.y/dx));
+            int cz = int(floorf(particle.pos.z/dx));
             if (isCellValid(cx,cy,cz,W,H,D) &&
                 labels[idx3d(cx,cy,cz,W,H)] == Utility::SOLID)
             {
-                if (!projectParticleDevice3D(p, labels, W,H,D, dx))
+                if (!projectParticleDevice3D(particle, labels, W,H,D, dx))
                     break;
             }
         }
-        return p;
+        return particle;
     }
 };
 
@@ -1104,7 +1104,7 @@ struct GlobalToLocal {
 
 int FluidSolver3D::pressureSolve() {
 
-    w_x_h_x_d = gridWidth * gridHeight * gridDepth;
+    //w_x_h_x_d = gridWidth * gridHeight * gridDepth;
 
     // новая нумерация
     thrust::device_vector<int> fluidNumbers_d(w_x_h_x_d, -1);
@@ -1192,8 +1192,17 @@ int FluidSolver3D::pressureSolve() {
         return -2;
     }
 
+    cudaStream_t stream = NULL;
+    cudaStreamCreate(&stream);
     cudssHandle_t handle;
     cudssStatus_t status = cudssCreate(&handle);
+    cudssSetStream(handle, stream);
+
+    cudssConfig_t solverConfig;
+    cudssData_t solverData;
+    cudssConfigCreate(&solverConfig);
+    cudssDataCreate(handle, &solverData);
+
     if (status != CUDSS_STATUS_SUCCESS) {
         std::cerr << "cuDSS init failed: " << status << std::endl;
         return -3;
@@ -1259,10 +1268,7 @@ int FluidSolver3D::pressureSolve() {
     );
 
     // Решение системы
-    cudssConfig_t solverConfig;
-    cudssData_t solverData;
-    cudssConfigCreate(&solverConfig);
-    cudssDataCreate(handle, &solverData);
+
 
     // Анализ
     status = cudssExecute(handle, CUDSS_PHASE_ANALYSIS,
@@ -1316,6 +1322,10 @@ int FluidSolver3D::pressureSolve() {
     status = cudssMatrixDestroy(A);
     status = cudssMatrixDestroy(b);
     status = cudssMatrixDestroy(x);
+    cudssDataDestroy(handle, solverData);
+    cudssConfigDestroy(solverConfig);
+    cudssDestroy(handle);
+    cudaStreamSynchronize(stream);
 
     return 0;
 }
@@ -1492,7 +1502,9 @@ __host__ void FluidSolver3D::frameStep(){
 
     //applying body forces on grid (e.g. gravity force)
     applyForces();
+    cudaDeviceSynchronize();
     pressureSolve();
+    cudaDeviceSynchronize();
     //applyPressure();
 
     //grid velocities to particles
