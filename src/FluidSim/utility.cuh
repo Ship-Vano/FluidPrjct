@@ -52,7 +52,7 @@ __device__ float2 operator-(const float2& a, const float2& b);
 __device__ float2 operator*(const float2& a, float b);
 
 
-const int VEL_UNKNOWN = INT_MIN;
+const int VEL_UNKNOWN = 0.0f;
 
 namespace Utility {
 

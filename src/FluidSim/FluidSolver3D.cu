@@ -1752,12 +1752,12 @@ int FluidSolver3D::pressureSolve() {
     cudssDestroy(handle);
     cudaStreamSynchronize(stream);
 
-    std::cout << "----solution local---" << std::endl;
-    thrust::host_vector<float> sol_h = solution;
-    for(int k = 0; k < sol_h.size(); ++k){
-        std::cout << sol_h[k] << ", ";
-    }
-    std::cout << std::endl;
+//    std::cout << "----solution local---" << std::endl;
+//    thrust::host_vector<float> sol_h = solution;
+//    for(int k = 0; k < sol_h.size(); ++k){
+//        std::cout << sol_h[k] << ", ";
+//    }
+//    std::cout << std::endl;
 
     //  Копирование решения в сетку давления
     thrust::device_vector<float> p_temp(w_x_h_x_d, 0.0f);
