@@ -99,6 +99,13 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
     Utility::save3dParticlesToPLY(h_particles, "InputData/particles_-1.ply");
 }
 
+struct FluidFlagFunctor {
+    __host__ __device__
+    int operator()(int label) const {
+        return label == Utility::FLUID ? 1 : 0;
+    }
+};
+
 __host__ void FluidSolver3D::seedParticles(int particlesPerCell){
     // Инициализация генератора (один раз вне функции!)
     static std::random_device rd;
@@ -109,15 +116,22 @@ __host__ void FluidSolver3D::seedParticles(int particlesPerCell){
     // Сначала подсчитываем общее количество частиц
     h_particles.clear();
     size_t totalParticles = 0;
-    for (int k = 0; k < gridDepth; ++k) {
-        for (int j = 0; j < gridHeight; ++j) {
-            for (int i = 0; i < gridWidth; ++i) {
-                if (labels(i,j,k) == Utility::FLUID) {
-                    totalParticles += particlesPerCell;
-                }
-            }
-        }
-    }
+    thrust::device_vector<int> flags(w_x_h_x_d, 0);
+    thrust::transform(
+            thrust::device,
+            labels.device_ptr(),
+            labels.device_ptr() + w_x_h_x_d,
+            flags.begin(),
+            FluidFlagFunctor()
+    );
+    fluidCellsAmount = thrust::reduce(
+            thrust::device,
+            flags.begin(),
+            flags.end(),
+            0,
+            thrust::plus<int>()
+    );
+    totalParticles = fluidCellsAmount * particlesPerCell;
 
     // Резервируем память заранее
     h_particles.reserve(totalParticles);
@@ -125,109 +139,153 @@ __host__ void FluidSolver3D::seedParticles(int particlesPerCell){
 
     // Проходим по всем ячейкам с жидкостью
     for(int k = 0; k < gridDepth; ++k)
-    for (int j = 0; j < gridHeight; ++j) {
-        for (int i = 0; i < gridWidth; ++i) {
-            if (labels(i,j,k) == Utility::FLUID) {
-                float3 cellCenter = Utility::getGridCellPosition(i, j, k, dx);
-                // 8 субрегионов (октантов) в 3D ячейке
-                float3 subCenters[8];
-                const float offset = 0.25f * dx;
+        for (int j = 0; j < gridHeight; ++j) {
+            for (int i = 0; i < gridWidth; ++i) {
+                if (labels(i,j,k) == Utility::FLUID) {
+                    float3 cellCenter = Utility::getGridCellPosition(i, j, k, dx);
+                    // 8 субрегионов (октантов) в 3D ячейке
+                    float3 subCenters[8];
+                    const float offset = 0.25f * dx;
 
-                // Генерируем центры субрегионов
-                for (int octant = 0; octant < 8; ++octant) {
-                    subCenters[octant] = {
-                            cellCenter.x + (octant & 1 ? offset : -offset),
-                            cellCenter.y + (octant & 2 ? offset : -offset),
-                            cellCenter.z + (octant & 4 ? offset : -offset)
-                    };
-                }
+                    // Генерируем центры субрегионов
+                    for (int octant = 0; octant < 8; ++octant) {
+                        subCenters[octant] = {
+                                cellCenter.x + (octant & 1 ? offset : -offset),
+                                cellCenter.y + (octant & 2 ? offset : -offset),
+                                cellCenter.z + (octant & 4 ? offset : -offset)
+                        };
+                    }
 
-                // Равномерное распределение частиц по субрегионам
-                for (int pind = 0; pind < particlesPerCell; ++pind) {
-                    // Случайный выбор субрегиона для каждой частицы
-                    int subCellIdx = subCellDist(gen);
+                    // Равномерное распределение частиц по субрегионам
+                    for (int pind = 0; pind < particlesPerCell; ++pind) {
+                        // Случайный выбор субрегиона для каждой частицы
+                        int subCellIdx = subCellDist(gen);
 
-                    // Случайное смещение
-                    float jitterX = jitterDist(gen) * dx;
-                    float jitterY = jitterDist(gen) * dx;
-                    float jitterZ = jitterDist(gen) * dx;
+                        // Случайное смещение
+                        float jitterX = jitterDist(gen) * dx;
+                        float jitterY = jitterDist(gen) * dx;
+                        float jitterZ = jitterDist(gen) * dx;
 
-                    // Позиция частицы
-                    float3 pos = {
-                            subCenters[subCellIdx].x + jitterX,
-                            subCenters[subCellIdx].y + jitterY,
-                            subCenters[subCellIdx].z + jitterZ
-                    };
+                        // Позиция частицы
+                        float3 pos = {
+                                subCenters[subCellIdx].x + jitterX,
+                                subCenters[subCellIdx].y + jitterY,
+                                subCenters[subCellIdx].z + jitterZ
+                        };
 
-                    // Ограничение позиции в пределах ячейки
-                    pos.x = std::clamp(pos.x, i * dx, (i + 1) * dx);
-                    pos.y = std::clamp(pos.y, j * dx, (j + 1) * dx);
-                    pos.z = std::clamp(pos.z, k * dx, (k + 1) * dx);
+                        // Ограничение позиции в пределах ячейки
+                        pos.x = std::clamp(pos.x, i * dx, (i + 1) * dx);
+                        pos.y = std::clamp(pos.y, j * dx, (j + 1) * dx);
+                        pos.z = std::clamp(pos.z, k * dx, (k + 1) * dx);
 
-                    // Создаем частицу
-                    Utility::Particle3D particle(pos, make_float3(0.0f, 0.0f, 0.0f));
+                        // Создаем частицу
+                        Utility::Particle3D particle(pos, make_float3(0.0f, 0.0f, 0.0f));
 
-                    // Добавляем в список
-                    h_particles.push_back(particle);
+                        // Добавляем в список
+                        h_particles.push_back(particle);
+                    }
                 }
             }
         }
-    }
     //thrust::copy(h_particles.begin(), h_particles.end(), d_particles.begin());
     d_particles = h_particles;
     blocksForParticles = (h_particles.size() + threadsPerBlock- 1) / threadsPerBlock;
 }
 
 
+struct ClearNonSolidFunctor {
+    __host__ __device__
+    int operator()(const int& oldLabel) const {
+        return (oldLabel == Utility::SOLID) ? Utility::SOLID : Utility::AIR;
+    }
+};
+struct MarkFluidCellsFunctor {
+    const Utility::Particle3D* particles;
+    float dx;
+    int W, H, D;
+    int* labels;    // raw‐pointer на labels.device_data
+
+    MarkFluidCellsFunctor(const Utility::Particle3D* _particles,
+                          float _dx, int _W, int _H, int _D,
+                          int* _labels)
+            : particles(_particles),
+              dx(_dx),
+              W(_W), H(_H), D(_D),
+              labels(_labels) {}
+
+    __device__
+    void operator()(int pid) const {
+        float3 p = particles[pid].pos;
+        int i = static_cast<int>(floorf(p.x / dx));
+        int j = static_cast<int>(floorf(p.y / dx));
+        int k = static_cast<int>(floorf(p.z / dx));
+        if (i < 0)   i = 0;
+        if (i >= W) i = W - 1;
+        if (j < 0)   j = 0;
+        if (j >= H) j = H - 1;
+        if (k < 0)   k = 0;
+        if (k >= D) k = D - 1;
+        int idx = i + j * W + k * (W * H);
+        if(labels[idx]!= Utility::SOLID){
+            labels[idx] = Utility::FLUID;
+        }
+    }
+};
+
 
 __host__ int FluidSolver3D::labelGrid() {
-    // 1. Очистка сетки с помощью Thrust
-    thrust::transform(thrust::device,
-                    labels.device_ptr(),
-                    labels.device_ptr() + labels.size(),
-                    labels.device_ptr(),
-                    ClearLabelsFunctor());
+    int totalCells = labels.width() * labels.height() * labels.depth();
 
-    // 2. Пометка ячеек с частицами
-    const int numParticles = d_particles.size();
+    // 1) Для каждой ячейки: если была SOLID, остаётся SOLID; иначе – AIR
+    thrust::transform(
+            thrust::device,
+            labels.device_data.begin(),
+            labels.device_data.begin() + totalCells,
+            labels.device_data.begin(),
+            ClearNonSolidFunctor()
+    );
+
+    // 2) Пометка FLUID-ячееk по текущим частицам
+    int numParticles = static_cast<int>(d_particles.size());
     if (numParticles > 0) {
         MarkFluidCellsFunctor functor(
                 thrust::raw_pointer_cast(d_particles.data()),
                 dx,
-                labels.width(),
-                labels.height(),
-                labels.depth(),
-                labels.device_ptr()
+                gridWidth, gridHeight, gridDepth,
+                thrust::raw_pointer_cast(labels.device_data.data())
         );
-
-        thrust::for_each(thrust::device,
-                        thrust::counting_iterator<int>(0),
-                        thrust::counting_iterator<int>(numParticles),
-                        functor);
+        thrust::for_each(
+                thrust::device,
+                thrust::make_counting_iterator<int>(0),
+                thrust::make_counting_iterator<int>(numParticles),
+                functor
+        );
     }
 
-    // 3. Проверка ошибок
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         std::cerr << "labelGrid3D_gpu error: " << cudaGetErrorString(err) << std::endl;
         return -1;
     }
-
     return 0;
 }
 
 void FluidSolver3D::saveVelocities() {
     thrust::copy(thrust::device,
-                u.device_data.begin(), u.device_data.end(),
-                uSaved.device_data.begin());
+                 u.device_data.begin(), u.device_data.end(),
+                 uSaved.device_data.begin());
 
     thrust::copy(thrust::device,
-                v.device_data.begin(), v.device_data.end(),
-                vSaved.device_data.begin());
+                 v.device_data.begin(), v.device_data.end(),
+                 vSaved.device_data.begin());
 
     thrust::copy(thrust::device,
-                w.device_data.begin(), w.device_data.end(),
-                wSaved.device_data.begin());
+                 w.device_data.begin(), w.device_data.end(),
+                 wSaved.device_data.begin());
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cerr << "saveVelocities() error: " << cudaGetErrorString(err) << std::endl;
+    }
 }
 
 // Структура для хранения временных данных (числители и знаменатели в p2g)
@@ -252,89 +310,161 @@ struct VelocityAccumulators {
 
 // Функтор для накопления скоростей
 struct AccumulateVelocities {
+    // Размеры сетки
+    int gridW, gridH, gridD;
     float dx;
-    int gridWidth, gridHeight, gridDepth;
-    int uStride, vStride, wStride;
+
+    // Полушаги для MAC-узлов
+    // u-грань: узлы по X имеют размер (gridW+1)×gridH×gridD
+    // v-грань: узлы по Y имеют размер gridW×(gridH+1)×gridD
+    // w-грань: узлы по Z имеют размер gridW×gridH×(gridD+1)
+
+    // Сырой указатель на массив частиц
     const Utility::Particle3D* particles;
+    int numParticles;
 
-    // Указатели на временные данные
-    float* uNum, *uDen;
-    float* vNum, *vDen;
-    float* wNum, *wDen;
+    // Указатели на временные аккумуляторы
+    float* uNum;
+    float* uDen;
+    float* vNum;
+    float* vDen;
+    float* wNum;
+    float* wDen;
+
+    // Индексы stride для удобства
+    // Для u: strideU_xy = (gridW+1) * gridH  (то есть шаг по Z)
+    // Для v: strideV_xy = gridW * (gridH+1)
+    // Для w: strideW_xy = gridW * gridH
+    int strideU_z;
+    int strideV_z;
+    int strideW_z;
 
     __device__
-    void operator()(int pidx) const {
-        Utility::Particle3D particle = particles[pidx];
-        float3 pos = particle.pos;
-        float3 vel = particle.vel;
+    void operator()(int pid) const {
+        // Получаем частицу
+        const Utility::Particle3D& P = particles[pid];
+        float3 pos = P.pos;
+        float3 vel = P.vel;
 
-        // Для u-компоненты (грани по X)
-        for (int j_offset = 0; j_offset < 2; j_offset++) {
-            for (int k_offset = 0; k_offset < 2; k_offset++) {
-                int i = static_cast<int>(pos.x / dx);
-                int j = static_cast<int>((pos.y - 0.5f * dx) / dx) + j_offset;
-                int k = static_cast<int>((pos.z - 0.5f * dx) / dx) + k_offset;
+        // Нормализуем к “ячейковым” координатам
+        float rx = pos.x / dx;
+        float ry = pos.y / dx;
+        float rz = pos.z / dx;
 
-                if (i >= 0 && i <= gridWidth &&
-                    j >= 0 && j < gridHeight &&
-                    k >= 0 && k < gridDepth) {
+        // --- Расчёт вкладов для компоненты U (face-centered по X) ---
+        // базовые индексы iU ∈ [0..gridW], jU ∈ [0..gridH-1], kU ∈ [0..gridD-1]
+        int iU = floorf(rx);
+        int jU = floorf(ry - 0.5f);
+        int kU = floorf(rz - 0.5f);
+        iU = min(max(iU, 0),     gridW);
+        jU = min(max(jU, 0),     gridH - 1);
+        kU = min(max(kU, 0),     gridD - 1);
 
-                    float3 node_pos = make_float3(i * dx, (j + 0.5f) * dx, (k + 0.5f) * dx);
-                    float weight = computeWeight(pos, node_pos, dx);
+        float fxU = rx      - iU;
+        float fyU = (ry - 0.5f) - jU;
+        float fzU = (rz - 0.5f) - kU;
+        fxU = fminf(fmaxf(fxU, 0.0f), 1.0f);
+        fyU = fminf(fmaxf(fyU, 0.0f), 1.0f);
+        fzU = fminf(fmaxf(fzU, 0.0f), 1.0f);
 
-                    int index = i + j * (gridWidth + 1) + k * (gridWidth + 1) * gridHeight;
-                    atomicAdd(&uNum[index], vel.x * weight);
-                    atomicAdd(&uDen[index], weight);
+        // Проходим по 8 соседним узлам U
+        for (int dz = 0; dz < 2; ++dz) {
+            int k = kU + dz;
+            if (k < 0 || k >= gridD) continue;
+            for (int dy = 0; dy < 2; ++dy) {
+                int j = jU + dy;
+                if (j < 0 || j >= gridH) continue;
+                for (int dxU = 0; dxU < 2; ++dxU) {
+                    int i = iU + dxU;
+                    if (i < 0 || i > gridW) continue;
+
+                    float wx = (dxU == 0 ? (1.0f - fxU) : fxU);
+                    float wy = (dy  == 0 ? (1.0f - fyU) : fyU);
+                    float wz = (dz  == 0 ? (1.0f - fzU) : fzU);
+                    float wgt = wx * wy * wz;
+
+                    int idx = i + j * (gridW + 1) + k * strideU_z;
+                    atomicAdd(&uNum[idx], vel.x * wgt);
+                    atomicAdd(&uDen[idx],        wgt);
                 }
-            }}
+            }
+        }
 
-        // Для v-компоненты (грани по Y)
-        for (int i_offset = 0; i_offset < 2; i_offset++) {
-            for (int k_offset = 0; k_offset < 2; k_offset++) {
-                int i = static_cast<int>((pos.x - 0.5f * dx) / dx) + i_offset;
-                int j = static_cast<int>(pos.y / dx);
-                int k = static_cast<int>((pos.z - 0.5f * dx) / dx) + k_offset;
+        // --- Расчёт вкладов для компоненты V (face-centered по Y) ---
+        // базовые индексы iV ∈ [0..gridW-1], jV ∈ [0..gridH], kV ∈ [0..gridD-1]
+        int iV = floorf(rx - 0.5f);
+        int jV = floorf(ry);
+        int kV = floorf(rz - 0.5f);
+        iV = min(max(iV, 0),     gridW - 1);
+        jV = min(max(jV, 0),     gridH);
+        kV = min(max(kV, 0),     gridD - 1);
 
-                if (i >= 0 && i < gridWidth &&
-                    j >= 0 && j <= gridHeight &&
-                    k >= 0 && k < gridDepth) {
+        float fxV = (rx - 0.5f) - iV;
+        float fyV = ry        - jV;
+        float fzV = (rz - 0.5f) - kV;
+        fxV = fminf(fmaxf(fxV, 0.0f), 1.0f);
+        fyV = fminf(fmaxf(fyV, 0.0f), 1.0f);
+        fzV = fminf(fmaxf(fzV, 0.0f), 1.0f);
 
-                    float3 node_pos = make_float3((i + 0.5f) * dx, j * dx, (k + 0.5f) * dx);
-                    float weight = computeWeight(pos, node_pos, dx);
-                    int index = i + j * gridWidth + k * vStride;
-                    atomicAdd(&vNum[index], vel.y * weight);
-                    atomicAdd(&vDen[index], weight);
+        for (int dz = 0; dz < 2; ++dz) {
+            int k = kV + dz;
+            if (k < 0 || k >= gridD) continue;
+            for (int dy = 0; dy < 2; ++dy) {
+                int j = jV + dy;
+                if (j < 0 || j > gridH) continue;
+                for (int dxV = 0; dxV < 2; ++dxV) {
+                    int i = iV + dxV;
+                    if (i < 0 || i >= gridW) continue;
+
+                    float wx = (dxV == 0 ? (1.0f - fxV) : fxV);
+                    float wy = (dy  == 0 ? (1.0f - fyV) : fyV);
+                    float wz = (dz  == 0 ? (1.0f - fzV) : fzV);
+                    float wgt = wx * wy * wz;
+
+                    int idx = i + j * gridW + k * strideV_z;
+                    atomicAdd(&vNum[idx], vel.y * wgt);
+                    atomicAdd(&vDen[idx],        wgt);
                 }
-            }}
+            }
+        }
 
-        // Для w-компоненты (грани по Z)
-        for (int i_offset = 0; i_offset < 2; i_offset++) {
-            for (int j_offset = 0; j_offset < 2; j_offset++) {
-                int i = static_cast<int>((pos.x - 0.5f * dx) / dx) + i_offset;
-                int j = static_cast<int>((pos.y - 0.5f * dx) / dx) + j_offset;
-                int k = static_cast<int>(pos.z / dx);
+        // --- Расчёт вкладов для компоненты W (face-centered по Z) ---
+        // базовые индексы iW ∈ [0..gridW-1], jW ∈ [0..gridH-1], kW ∈ [0..gridD]
+        int iW = floorf(rx - 0.5f);
+        int jW = floorf(ry - 0.5f);
+        int kW = floorf(rz);
+        iW = min(max(iW, 0),     gridW - 1);
+        jW = min(max(jW, 0),     gridH - 1);
+        kW = min(max(kW, 0),     gridD);
 
-                if (i >= 0 && i < gridWidth &&
-                    j >= 0 && j < gridHeight &&
-                    k >= 0 && k <= gridDepth) {
+        float fxW = (rx - 0.5f) - iW;
+        float fyW = (ry - 0.5f) - jW;
+        float fzW = rz        - kW;
+        fxW = fminf(fmaxf(fxW, 0.0f), 1.0f);
+        fyW = fminf(fmaxf(fyW, 0.0f), 1.0f);
+        fzW = fminf(fmaxf(fzW, 0.0f), 1.0f);
 
-                    float3 node_pos = make_float3((i + 0.5f) * dx, (j + 0.5f) * dx, k * dx);
-                    float weight = computeWeight(pos, node_pos, dx);
-                    int index = i + j * gridWidth + k * wStride;
-                    atomicAdd(&wNum[index], vel.z * weight);
-                    atomicAdd(&wDen[index], weight);
+        for (int dz = 0; dz < 2; ++dz) {
+            int k = kW + dz;
+            if (k < 0 || k > gridD) continue;
+            for (int dy = 0; dy < 2; ++dy) {
+                int j = jW + dy;
+                if (j < 0 || j >= gridH) continue;
+                for (int dxW = 0; dxW < 2; ++dxW) {
+                    int i = iW + dxW;
+                    if (i < 0 || i >= gridW) continue;
+
+                    float wx = (dxW == 0 ? (1.0f - fxW) : fxW);
+                    float wy = (dy  == 0 ? (1.0f - fyW) : fyW);
+                    float wz = (dz  == 0 ? (1.0f - fzW) : fzW);
+                    float wgt = wx * wy * wz;
+
+                    int idx = i + j * gridW + k * strideW_z;
+                    atomicAdd(&wNum[idx], vel.z * wgt);
+                    atomicAdd(&wDen[idx],        wgt);
                 }
-            }}
-    }
-    __device__
-    float computeWeight(float3 p_pos, float3 node_pos, float dx) const {
-        float3 dist = make_float3(p_pos.x - node_pos.x,
-                                p_pos.y - node_pos.y,
-                                p_pos.z - node_pos.z);
-        float wx = fmaxf(0.0f, 1.0f - fabsf(dist.x / dx));
-        float wy = fmaxf(0.0f, 1.0f - fabsf(dist.y / dx));
-        float wz = fmaxf(0.0f, 1.0f - fabsf(dist.z / dx));
-        return wx * wy * wz;
+            }
+        }
     }
 };
 
@@ -349,24 +479,30 @@ struct ComputeVelocityFunc {
 };
 
 void FluidSolver3D::particlesToGrid() {
-    // Размеры компонент скорости
+    // 3.1) Размеры компонент скорости
     const int uSize = (gridWidth + 1) * gridHeight * gridDepth;
     const int vSize = gridWidth * (gridHeight + 1) * gridDepth;
     const int wSize = gridWidth * gridHeight * (gridDepth + 1);
 
-    // Инициализация временных аккумуляторов
+    // 3.2) Создаём временные аккумуляторы и обнуляем их
     VelocityAccumulators accum(uSize, vSize, wSize);
 
-    // Создание функтора для накопления
+    // Заполняем нулями
+    thrust::fill(accum.uNum.begin(), accum.uNum.end(), 0.0f);
+    thrust::fill(accum.uDen.begin(), accum.uDen.end(), 0.0f);
+    thrust::fill(accum.vNum.begin(), accum.vNum.end(), 0.0f);
+    thrust::fill(accum.vDen.begin(), accum.vDen.end(), 0.0f);
+    thrust::fill(accum.wNum.begin(), accum.wNum.end(), 0.0f);
+    thrust::fill(accum.wDen.begin(), accum.wDen.end(), 0.0f);
+
+    // 3.3) Настраиваем функтор накопления
     AccumulateVelocities accFunc;
-    accFunc.dx = dx;
-    accFunc.gridWidth = gridWidth;
-    accFunc.gridHeight = gridHeight;
-    accFunc.gridDepth = gridDepth;
-    accFunc.uStride = (gridWidth + 1) * gridHeight;
-    accFunc.vStride = gridWidth * (gridHeight + 1);
-    accFunc.wStride = gridWidth * gridHeight;
+    accFunc.dx        = dx;
+    accFunc.gridW     = gridWidth;
+    accFunc.gridH     = gridHeight;
+    accFunc.gridD     = gridDepth;
     accFunc.particles = thrust::raw_pointer_cast(d_particles.data());
+    accFunc.numParticles = static_cast<int>(d_particles.size());
     accFunc.uNum = thrust::raw_pointer_cast(accum.uNum.data());
     accFunc.uDen = thrust::raw_pointer_cast(accum.uDen.data());
     accFunc.vNum = thrust::raw_pointer_cast(accum.vNum.data());
@@ -374,40 +510,52 @@ void FluidSolver3D::particlesToGrid() {
     accFunc.wNum = thrust::raw_pointer_cast(accum.wNum.data());
     accFunc.wDen = thrust::raw_pointer_cast(accum.wDen.data());
 
-    // Запуск накопления через Thrust
+    // Вычисляем strides (шаг по Z) для каждого массива
+    accFunc.strideU_z = (gridWidth + 1) * gridHeight;
+    accFunc.strideV_z =  gridWidth       * (gridHeight + 1);
+    accFunc.strideW_z =  gridWidth       *  gridHeight;
+
+    // 3.4) Запускаем накопление атомарными операциями
     thrust::for_each(
             thrust::device,
             thrust::counting_iterator<int>(0),
-            thrust::counting_iterator<int>(d_particles.size()),
+            thrust::counting_iterator<int>(static_cast<int>(d_particles.size())),
             accFunc
     );
 
+    // 3.5) Нормализуем (num/den) → записываем в u,v,w
     // Для u-компоненты
     thrust::transform(
             thrust::device,
             thrust::make_zip_iterator(thrust::make_tuple(accum.uNum.begin(), accum.uDen.begin())),
-            thrust::make_zip_iterator(thrust::make_tuple(accum.uNum.end(), accum.uDen.end())),
+            thrust::make_zip_iterator(thrust::make_tuple(accum.uNum.end(),   accum.uDen.end())),
             u.device_data.begin(),
             ComputeVelocityFunc()
     );
 
-// Для v-компоненты
+    // Для v-компоненты
     thrust::transform(
             thrust::device,
             thrust::make_zip_iterator(thrust::make_tuple(accum.vNum.begin(), accum.vDen.begin())),
-            thrust::make_zip_iterator(thrust::make_tuple(accum.vNum.end(), accum.vDen.end())),
+            thrust::make_zip_iterator(thrust::make_tuple(accum.vNum.end(),   accum.vDen.end())),
             v.device_data.begin(),
             ComputeVelocityFunc()
     );
 
-// Для w-компоненты
+    // Для w-компоненты
     thrust::transform(
             thrust::device,
             thrust::make_zip_iterator(thrust::make_tuple(accum.wNum.begin(), accum.wDen.begin())),
-            thrust::make_zip_iterator(thrust::make_tuple(accum.wNum.end(), accum.wDen.end())),
+            thrust::make_zip_iterator(thrust::make_tuple(accum.wNum.end(),   accum.wDen.end())),
             w.device_data.begin(),
             ComputeVelocityFunc()
     );
+
+    // 3.6) Проверяем ошибки CUDA
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cerr << "P2G error: " << cudaGetErrorString(err) << std::endl;
+    }
 }
 
 struct ApplyScalarForce
@@ -415,44 +563,86 @@ struct ApplyScalarForce
     float dt, a, vel_unknown;
 
     ApplyScalarForce(float _dt, float _a, float _vel_unknown)
-        : dt(_dt), a(_a), vel_unknown(_vel_unknown) {}
+            : dt(_dt), a(_a), vel_unknown(_vel_unknown) {}
 
     __host__ __device__
     float operator()(const float& x) const {
-        return (x == vel_unknown) ? x : x + dt * a;
+        return (x > vel_unknown) ? x + dt * a : x;
     }
 };
 
 void FluidSolver3D::applyForces(){
 
     thrust::transform(
-        u.device_data.begin(), u.device_data.end(),         // вход
-        u.device_data.begin(),                  // выход 
-        ApplyScalarForce(dt, GRAVITY.x, VEL_UNKNOWN)
+            thrust::device,
+            u.device_data.begin(), u.device_data.end(),         // вход
+            u.device_data.begin(),                  // выход
+            ApplyScalarForce(dt, GRAVITY.x, VEL_UNKNOWN)
     );
+//    u.copy_to_host();
+//        std::cout << "----u 3d---" << std::endl;
+//    for(int k = 0; k < gridDepth; ++k){
+//        for(int j = 0; j < gridHeight; ++j){
+//            for(int i = 0; i < gridWidth+1; ++i){
+//                std::cout << u.host_data[i + j*(gridWidth+1) + k * (gridWidth+1)*gridHeight] << ", ";
+//            }
+//            std::cout << std::endl;
+//        }
+//        std::cout << std::endl;
+//    }
 
     thrust::transform(
-        v.device_data.begin(), v.device_data.end(),
-        v.device_data.begin(),
-        ApplyScalarForce(dt, GRAVITY.y, VEL_UNKNOWN)
+            thrust::device,
+            v.device_data.begin(), v.device_data.end(),
+            v.device_data.begin(),
+            ApplyScalarForce(dt, GRAVITY.y, VEL_UNKNOWN)
     );
 
+//    v.copy_to_host();
+//    std::cout << "----v 3d---" << std::endl;
+//    for(int k = 0; k < gridDepth; ++k){
+//        for(int j = 0; j < gridHeight+1; ++j){
+//            for(int i = 0; i < gridWidth; ++i){
+//                std::cout << v.host_data[i + j*(gridWidth) + k * (gridWidth)*(gridHeight+1)] << ", ";
+//            }
+//            std::cout << std::endl;
+//        }
+//        std::cout << std::endl;
+//    }
+
     thrust::transform(
-        w.device_data.begin(), w.device_data.end(),
-        w.device_data.begin(),
-        ApplyScalarForce(dt, GRAVITY.z, VEL_UNKNOWN)
+            thrust::device,
+            w.device_data.begin(), w.device_data.end(),
+            w.device_data.begin(),
+            ApplyScalarForce(dt, GRAVITY.z, VEL_UNKNOWN)
     );
+
+//    w.copy_to_host();
+//    std::cout << "----w 3d---" << std::endl;
+//    for(int k = 0; k < gridDepth+1; ++k){
+//        for(int j = 0; j < gridHeight; ++j){
+//            for(int i = 0; i < gridWidth; ++i){
+//                std::cout << w.host_data[i + j*(gridWidth) + k * (gridWidth)*(gridHeight)] << ", ";
+//            }
+//            std::cout << std::endl;
+//        }
+//        std::cout << std::endl;
+//    }
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cerr << "ApplyForces() error: " << cudaGetErrorString(err) << std::endl;
+    }
 }
 
 // ----------------------------------
 // 1) Вспомогательная __device__-функция трёхлинейной интерполяции
 __host__ __device__
 float trilerp(const float* fld,
-                int i,int j,int k,
-                float fx,float fy,float fz,
-                int stride_i,int stride_j)
+              int i,int j,int k,
+              float fx,float fy,float fz,
+              int stride_i,int stride_j)
 {
-    #define SAMP(ii,jj,kk) fld[(ii) + (jj)*stride_i + (kk)*stride_j]
+#define SAMP(ii,jj,kk) fld[(ii) + (jj)*stride_i + (kk)*stride_j]
     float c00 = SAMP(i  , j  , k  )*(1-fx) + SAMP(i+1, j  , k  )*fx;
     float c10 = SAMP(i  , j+1, k  )*(1-fx) + SAMP(i+1, j+1, k  )*fx;
     float c01 = SAMP(i  , j  , k+1)*(1-fx) + SAMP(i+1, j  , k+1)*fx;
@@ -460,132 +650,266 @@ float trilerp(const float* fld,
     float c0  = c00*(1-fy) + c10*fy;
     float c1  = c01*(1-fy) + c11*fy;
     float c   = c0*(1-fz) + c1*fz;
-    #undef SAMP
+#undef SAMP
     return c;
 }
 
+__host__ __device__
+float trilinearInterpolation(
+        const float xd, const float yd, const float zd,
+        const float c000, const float c100, const float c001, const float c101,
+        const float c010, const float c110, const float c011, const float c111)
+{
+    // Интерполяция вдоль X
+    float c00 = c000 * (1.0f - xd) + c100 * xd;  // z=0, y=0
+    float c01 = c001 * (1.0f - xd) + c101 * xd;  // z=1, y=0
+    float c10 = c010 * (1.0f - xd) + c110 * xd;  // z=0, y=1
+    float c11 = c011 * (1.0f - xd) + c111 * xd;  // z=1, y=1
+
+    // Интерполяция вдоль Y
+    float c0 = c00 * (1.0f - yd) + c10 * yd;  // z=0
+    float c1 = c01 * (1.0f - yd) + c11 * yd;  // z=1
+
+    // Интерполяция вдоль Z
+    return c0 * (1.0f - zd) + c1 * zd;
+}
 // ----------------------------------
-// 2) Функтор переноса скоростей с сетки на частицу
 struct GridToParticleFunctor
 {
-    int W,H,D;
-    float3 origin;
+    int W, H, D;
     float  dx, alpha;
 
-    // raw-пойнтеры на device_data[]
+    // raw-указатели на device_data[]
     const float *u, *v, *w;
-    const float *du,*dv,*dw;
+    const float *du, *dv, *dw;
 
-    GridToParticleFunctor(int _W,int _H,int _D,
-                            float3 _orig,float _dx,float _alpha,
-                            const float* _u,const float* _v,const float* _w,
-                            const float* _du,const float* _dv,const float* _dw)
-        : W(_W), H(_H), D(_D),
-        origin(_orig), dx(_dx), alpha(_alpha),
-        u(_u), v(_v), w(_w),
-        du(_du), dv(_dv), dw(_dw)
-    {}
+    GridToParticleFunctor(int _W, int _H, int _D,
+                          float _dx, float _alpha,
+                          const float* _u, const float* _v, const float* _w,
+                          const float* _du, const float* _dv, const float* _dw)
+            : W(_W), H(_H), D(_D),
+              dx(_dx), alpha(_alpha),
+              u(_u), v(_v), w(_w),
+              du(_du), dv(_dv), dw(_dw) {}
 
     __device__
     Utility::Particle3D operator()(const Utility::Particle3D& pin) const
     {
         Utility::Particle3D pout = pin;
 
-        // локальные координаты в ячейках
-        float rel_x = (pin.pos.x - origin.x) * (1.0f / dx);
-        float rel_y = (pin.pos.y - origin.y) * (1.0f / dx);
-        float rel_z = (pin.pos.z - origin.z) * (1.0f / dx);
+        // 1) Нормализованные “cell-space” координаты
+        float rx = pin.pos.x / dx;
+        float ry = pin.pos.y / dx;
+        float rz = pin.pos.z / dx;
 
-        int i = floorf(rel_x);
-        int j = floorf(rel_y);
-        int k = floorf(rel_z);
+        // --- Интерполяция U (MAC face по X) ---
+        // базовые индексы: iU ∈ [0..W], jU ∈ [0..H-1], kU ∈ [0..D-1]
+        int iU = floorf(rx);
+        int jU = floorf(ry - 0.5f);
+        int kU = floorf(rz - 0.5f);
+        // зажимаем в допустимый диапазон
+        iU = min(max(iU, 0),     W);
+        jU = min(max(jU, 0),     H - 1);
+        kU = min(max(kU, 0),     D - 1);
+        // дробные части внутри “ячейки” U
+        float fxU = rx - iU;
+        float fyU = (ry - 0.5f) - jU;
+        float fzU = (rz - 0.5f) - kU;
+        fxU = fminf(fmaxf(fxU, 0.0f), 1.0f);
+        fyU = fminf(fmaxf(fyU, 0.0f), 1.0f);
+        fzU = fminf(fmaxf(fzU, 0.0f), 1.0f);
 
-        if (i < 0 || i >= W || j < 0 || j >= H || k < 0 || k >= D)
-            return pout;
+        // адресация 8 вершин массива u (размер (W+1) × H × D):
+        // idx_u(i,j,k) = i + j*(W+1) + k*(W+1)*H
+        int baseU = jU * (W + 1) + kU * (W + 1) * H;
+        float u000 = u[ iU     + baseU ];
+        float u100 = u[(iU + 1) + baseU ];
+        float u010 = u[ iU     + (jU + 1) * (W + 1) + kU * (W + 1) * H ];
+        float u110 = u[(iU + 1) + (jU + 1) * (W + 1) + kU * (W + 1) * H ];
+        float u001 = u[ iU     + jU * (W + 1) + (kU + 1) * (W + 1) * H ];
+        float u101 = u[(iU + 1) + jU * (W + 1) + (kU + 1) * (W + 1) * H ];
+        float u011 = u[ iU     + (jU + 1) * (W + 1) + (kU + 1) * (W + 1) * H ];
+        float u111 = u[(iU + 1) + (jU + 1) * (W + 1) + (kU + 1) * (W + 1) * H ];
+        float uPIC = trilinearInterpolation(
+                fxU, fyU, fzU,
+                u000, u100, u001, u101,
+                u010, u110, u011, u111
+        );
 
-        float fx = rel_x - i;
-        float fy = rel_y - j;
-        float fz = rel_z - k;
+        float du000 = du[ iU     + baseU ];
+        float du100 = du[(iU + 1) + baseU ];
+        float du010 = du[ iU     + (jU + 1) * (W + 1) + kU * (W + 1) * H ];
+        float du110 = du[(iU + 1) + (jU + 1) * (W + 1) + kU * (W + 1) * H ];
+        float du001 = du[ iU     + jU * (W + 1) + (kU + 1) * (W + 1) * H ];
+        float du101 = du[(iU + 1) + jU * (W + 1) + (kU + 1) * (W + 1) * H ];
+        float du011 = du[ iU     + (jU + 1) * (W + 1) + (kU + 1) * (W + 1) * H ];
+        float du111 = du[(iU + 1) + (jU + 1) * (W + 1) + (kU + 1) * (W + 1) * H ];
+        float duFLIP = trilinearInterpolation(
+                fxU, fyU, fzU,
+                du000, du100, du001, du101,
+                du010, du110, du011, du111
+        );
 
-        // PIC: исходные u,v,w
-        float uc  = trilerp(u,  i, j, k, fx,fy,fz, (W+1), (W+1)*H);
-        float vc  = trilerp(v,  i, j, k, fx,fy,fz,  W,     W*(H+1));
-        float wc  = trilerp(w,  i, j, k, fx,fy,fz,  W,     W*H    );
+        // --- Интерполяция V (MAC face по Y) ---
+        // iV ∈ [0..W-1], jV ∈ [0..H], kV ∈ [0..D-1]
+        int iV = floorf(rx - 0.5f);
+        int jV = floorf(ry);
+        int kV = floorf(rz - 0.5f);
+        iV = min(max(iV, 0),     W - 1);
+        jV = min(max(jV, 0),     H);
+        kV = min(max(kV, 0),     D - 1);
 
-        // FLIP: дельты
-        float duc = trilerp(du, i, j, k, fx,fy,fz, (W+1), (W+1)*H);
-        float dvc = trilerp(dv, i, j, k, fx,fy,fz,  W,     W*(H+1));
-        float dwc = trilerp(dw, i, j, k, fx,fy,fz,  W,     W*H    );
+        float fxV = (rx - 0.5f) - iV;
+        float fyV = ry - jV;
+        float fzV = (rz - 0.5f) - kV;
+        fxV = fminf(fmaxf(fxV, 0.0f), 1.0f);
+        fyV = fminf(fmaxf(fyV, 0.0f), 1.0f);
+        fzV = fminf(fmaxf(fzV, 0.0f), 1.0f);
 
-        // микс PIC/FLIP
-        pout.vel.x = alpha * uc + (pin.vel.x + duc) * (1.0f - alpha);
-        pout.vel.y = alpha * vc + (pin.vel.y + dvc) * (1.0f - alpha);
-        pout.vel.z = alpha * wc + (pin.vel.z + dwc) * (1.0f - alpha);
+        // idx_v(i,j,k) = i + j*W + k*(W*(H+1))
+        int baseV = jV * W + kV * (W * (H + 1));
+        float v000 = v[ iV     + baseV ];
+        float v100 = v[(iV + 1) + baseV ];
+        float v010 = v[ iV     + (jV + 1) * W + kV * (W * (H + 1)) ];
+        float v110 = v[(iV + 1) + (jV + 1) * W + kV * (W * (H + 1)) ];
+        float v001 = v[ iV     + jV * W + (kV + 1) * (W * (H + 1)) ];
+        float v101 = v[(iV + 1) + jV * W + (kV + 1) * (W * (H + 1)) ];
+        float v011 = v[ iV     + (jV + 1) * W + (kV + 1) * (W * (H + 1)) ];
+        float v111 = v[(iV + 1) + (jV + 1) * W + (kV + 1) * (W * (H + 1)) ];
+        float vPIC = trilinearInterpolation(
+                fxV, fyV, fzV,
+                v000, v100, v001, v101,
+                v010, v110, v011, v111
+        );
+
+        float dv000 = dv[ iV     + baseV ];
+        float dv100 = dv[(iV + 1) + baseV ];
+        float dv010 = dv[ iV     + (jV + 1) * W + kV * (W * (H + 1)) ];
+        float dv110 = dv[(iV + 1) + (jV + 1) * W + kV * (W * (H + 1)) ];
+        float dv001 = dv[ iV     + jV * W + (kV + 1) * (W * (H + 1)) ];
+        float dv101 = dv[(iV + 1) + jV * W + (kV + 1) * (W * (H + 1)) ];
+        float dv011 = dv[ iV     + (jV + 1) * W + (kV + 1) * (W * (H + 1)) ];
+        float dv111 = dv[(iV + 1) + (jV + 1) * W + (kV + 1) * (W * (H + 1)) ];
+        float dvFLIP = trilinearInterpolation(
+                fxV, fyV, fzV,
+                dv000, dv100, dv001, dv101,
+                dv010, dv110, dv011, dv111
+        );
+
+        // --- Интерполяция W (MAC face по Z) ---
+        // iW ∈ [0..W-1], jW ∈ [0..H-1], kW ∈ [0..D]
+        int iW = floorf(rx - 0.5f);
+        int jW = floorf(ry - 0.5f);
+        int kW = floorf(rz);
+        iW = min(max(iW, 0),     W - 1);
+        jW = min(max(jW, 0),     H - 1);
+        kW = min(max(kW, 0),     D);
+
+        float fxW = (rx - 0.5f) - iW;
+        float fyW = (ry - 0.5f) - jW;
+        float fzW = rz - kW;
+        fxW = fminf(fmaxf(fxW, 0.0f), 1.0f);
+        fyW = fminf(fmaxf(fyW, 0.0f), 1.0f);
+        fzW = fminf(fmaxf(fzW, 0.0f), 1.0f);
+
+        // idx_w(i,j,k) = i + j*W + k*(W*H)
+        int baseW = jW * W + kW * (W * H);
+        float w000 = w[ iW     + baseW ];
+        float w100 = w[(iW + 1) + baseW ];
+        float w010 = w[ iW     + (jW + 1) * W + kW * (W * H) ];
+        float w110 = w[(iW + 1) + (jW + 1) * W + kW * (W * H) ];
+        float w001 = w[ iW     + jW * W + (kW + 1) * (W * H) ];
+        float w101 = w[(iW + 1) + jW * W + (kW + 1) * (W * H) ];
+        float w011 = w[ iW     + (jW + 1) * W + (kW + 1) * (W * H) ];
+        float w111 = w[(iW + 1) + (jW + 1) * W + (kW + 1) * (W * H) ];
+        float wPIC = trilinearInterpolation(
+                fxW, fyW, fzW,
+                w000, w100, w001, w101,
+                w010, w110, w011, w111
+        );
+
+        float dw000 = dw[ iW     + baseW ];
+        float dw100 = dw[(iW + 1) + baseW ];
+        float dw010 = dw[ iW     + (jW + 1) * W + kW * (W * H) ];
+        float dw110 = dw[(iW + 1) + (jW + 1) * W + kW * (W * H) ];
+        float dw001 = dw[ iW     + jW * W + (kW + 1) * (W * H) ];
+        float dw101 = dw[(iW + 1) + jW * W + (kW + 1) * (W * H) ];
+        float dw011 = dw[ iW     + (jW + 1) * W + (kW + 1) * (W * H) ];
+        float dw111 = dw[(iW + 1) + (jW + 1) * W + (kW + 1) * (W * H) ];
+        float dwFLIP = trilinearInterpolation(
+                fxW, fyW, fzW,
+                dw000, dw100, dw001, dw101,
+                dw010, dw110, dw011, dw111
+        );
+
+        // 2) Форма FLIP: pin.vel + delta-скорость, а PIC – это просто uPIC,vPIC,wPIC
+        float newU = alpha * uPIC + (1.0f - alpha) * (pin.vel.x + duFLIP);
+        float newV = alpha * vPIC + (1.0f - alpha) * (pin.vel.y + dvFLIP);
+        float newW = alpha * wPIC + (1.0f - alpha) * (pin.vel.z + dwFLIP);
+
+        pout.vel = make_float3(newU, newV, newW);
 
         return pout;
     }
 };
 
 // ----------------------------------
-// 3) Обновляем метод FluidSolver3D::gridToParticles
 void FluidSolver3D::gridToParticles(float alpha)
 {
-    // размеры MAC-решёток
-    int Nu = (gridWidth+1)*gridHeight*gridDepth;
-    int Nv = gridWidth*(gridHeight+1)*gridDepth;
-    int Nw = gridWidth*gridHeight*(gridDepth+1);
+    // 1) размеры MAC-решёток
+    int Nu = (gridWidth + 1) * gridHeight * gridDepth;
+    int Nv = gridWidth * (gridHeight + 1) * gridDepth;
+    int Nw = gridWidth * gridHeight * (gridDepth + 1);
 
-    // 3.1) вычисляем дельты в конструкторах device_vector
+    // 2) вычисляем дельты (new – old) в отдельные device_vector
     thrust::device_vector<float> du(Nu);
     thrust::device_vector<float> dv(Nv);
     thrust::device_vector<float> dw(Nw);
 
-    // вместо zip_iterator:
     thrust::transform(
-        u.device_data.begin(),                   // new
-        u.device_data.end(),
-        uSaved.device_data.begin(),              // old
-        du.begin(),                              // out
-        thrust::minus<float>()                   // new - old
+            u.device_data.begin(), u.device_data.end(),
+            uSaved.device_data.begin(),
+            du.begin(),
+            thrust::minus<float>()
+    );
+    thrust::transform(
+            v.device_data.begin(), v.device_data.end(),
+            vSaved.device_data.begin(),
+            dv.begin(),
+            thrust::minus<float>()
+    );
+    thrust::transform(
+            w.device_data.begin(), w.device_data.end(),
+            wSaved.device_data.begin(),
+            dw.begin(),
+            thrust::minus<float>()
     );
 
-    thrust::transform(
-        v.device_data.begin(),
-        v.device_data.end(),
-        vSaved.device_data.begin(),
-        dv.begin(),
-        thrust::minus<float>()
-    );
-
-    thrust::transform(
-        w.device_data.begin(),
-        w.device_data.end(),
-        wSaved.device_data.begin(),
-        dw.begin(),
-        thrust::minus<float>()
-    );
-
-    // 3.2) raw-пойнтеры из Grid3D
+    // 3) получаем raw-указатели
     const float* pu  = u.device_ptr();
     const float* pv  = v.device_ptr();
     const float* pw  = w.device_ptr();
-    const float* pdu = du.data().get();  // device_vector<float>::data().get()
-    const float* pdv = dv.data().get();
-    const float* pdw = dw.data().get();
+    const float* pdu = thrust::raw_pointer_cast(du.data());
+    const float* pdv = thrust::raw_pointer_cast(dv.data());
+    const float* pdw = thrust::raw_pointer_cast(dw.data());
 
-    // 3.3) один transform по частицам
+    // 4) запускаем один transform по всем частицам
     thrust::transform(
-        d_particles.begin(),
-        d_particles.end(),
-        d_particles.begin(),
-        GridToParticleFunctor(
-            gridWidth, gridHeight, gridDepth,
-            make_float3(0,0,0),  // origin
-            dx, alpha,
-            pu, pv, pw,
-            pdu, pdv, pdw
-        )
+            d_particles.begin(),
+            d_particles.end(),
+            d_particles.begin(),
+            GridToParticleFunctor(
+                    gridWidth, gridHeight, gridDepth,
+                    dx, alpha,
+                    pu, pv, pw,
+                    pdu, pdv, pdw
+            )
     );
+
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cerr << "G2P error: " << cudaGetErrorString(err) << std::endl;
+    }
 }
 
 __device__ inline bool isCellValid(int x, int y, int z, int W, int H, int D) {
@@ -596,85 +920,170 @@ __device__ inline int idx3d(int x , int y, int z, int W, int H){
     return x + y * W + z * W * H;
 }
 
+// ----------------------------------
+// 1) Исправленная функция интерполяции MAC-скоростей (без FLIP-дельт)
 __device__
-float3 interpVelDevice3D(const float* uGrid, const float* vGrid, const float* wGrid,
-                            int W,int H,int D, float dx, float3 pos){
-    // переводим в "ячейковые" координаты
+float3 interpVelDevice3D(const float* u, const float* v, const float* w,
+                         int W, int H, int D, float dx, float3 pos)
+{
+    // Преобразуем позицию в “ячейковые” координаты
     float rx = pos.x / dx;
     float ry = pos.y / dx;
     float rz = pos.z / dx;
-    int i = min(max(int(floorf(rx)), 0), W);
-    int j = min(max(int(floorf(ry)), 0), H);
-    int k = min(max(int(floorf(rz)), 0), D);
-    float fx = rx - i;
-    float fy = ry - j;
-    float fz = rz - k;
 
-    // strides
-    int s_i = 1;
-    int s_j = (W+1);
+    // --- Интерполяция U (MAC-грань по X) ---
+    // iU ∈ [0..W], jU ∈ [0..H-1], kU ∈ [0..D-1]
+    int iU = floorf(rx);
+    int jU = floorf(ry - 0.5f);
+    int kU = floorf(rz - 0.5f);
+    iU = min(max(iU, 0),     W);
+    jU = min(max(jU, 0),     H - 1);
+    kU = min(max(kU, 0),     D - 1);
 
-    float ux = trilerp(uGrid, i, j, k, fx, fy, fz, s_i, s_j);
-    float vy = trilerp(vGrid, i, j, k, fx, fy, fz, s_i, s_j);
-    float wz = trilerp(wGrid, i, j, k, fx, fy, fz, s_i, s_j);
+    float fxU = rx - iU;
+    float fyU = (ry - 0.5f) - jU;
+    float fzU = (rz - 0.5f) - kU;
+    fxU = fminf(fmaxf(fxU, 0.0f), 1.0f);
+    fyU = fminf(fmaxf(fyU, 0.0f), 1.0f);
+    fzU = fminf(fmaxf(fzU, 0.0f), 1.0f);
 
-    return make_float3(ux, vy, wz);
+    // Линейный индекс в массиве u: idx_u(i,j,k) = i + j*(W+1) + k*(W+1)*H
+    int baseU = jU * (W + 1) + kU * (W + 1) * H;
+    float u000 = u[ iU     + baseU ];
+    float u100 = u[(iU + 1) + baseU ];
+    float u010 = u[ iU     + (jU + 1)*(W + 1) + kU*(W + 1)*H ];
+    float u110 = u[(iU + 1) + (jU + 1)*(W + 1) + kU*(W + 1)*H ];
+    float u001 = u[ iU     + jU*(W + 1) + (kU + 1)*(W + 1)*H ];
+    float u101 = u[(iU + 1) + jU*(W + 1) + (kU + 1)*(W + 1)*H ];
+    float u011 = u[ iU     + (jU + 1)*(W + 1) + (kU + 1)*(W + 1)*H ];
+    float u111 = u[(iU + 1) + (jU + 1)*(W + 1) + (kU + 1)*(W + 1)*H ];
+    float uInterp = trilinearInterpolation(
+            fxU, fyU, fzU,
+            u000, u100, u001, u101,
+            u010, u110, u011, u111
+    );
+
+    // --- Интерполяция V (MAC-грань по Y) ---
+    // iV ∈ [0..W-1], jV ∈ [0..H], kV ∈ [0..D-1]
+    int iV = floorf(rx - 0.5f);
+    int jV = floorf(ry);
+    int kV = floorf(rz - 0.5f);
+    iV = min(max(iV, 0),     W - 1);
+    jV = min(max(jV, 0),     H);
+    kV = min(max(kV, 0),     D - 1);
+
+    float fxV = (rx - 0.5f) - iV;
+    float fyV = ry - jV;
+    float fzV = (rz - 0.5f) - kV;
+    fxV = fminf(fmaxf(fxV, 0.0f), 1.0f);
+    fyV = fminf(fmaxf(fyV, 0.0f), 1.0f);
+    fzV = fminf(fmaxf(fzV, 0.0f), 1.0f);
+
+    // idx_v(i,j,k) = i + j*W + k*(W*(H+1))
+    int baseV = jV * W + kV * (W * (H + 1));
+    float v000 = v[ iV     + baseV ];
+    float v100 = v[(iV + 1) + baseV ];
+    float v010 = v[ iV     + (jV + 1)*W + kV*(W*(H + 1)) ];
+    float v110 = v[(iV + 1) + (jV + 1)*W + kV*(W*(H + 1)) ];
+    float v001 = v[ iV     + jV*W + (kV + 1)*(W*(H + 1)) ];
+    float v101 = v[(iV + 1) + jV*W + (kV + 1)*(W*(H + 1)) ];
+    float v011 = v[ iV     + (jV + 1)*W + (kV + 1)*(W*(H + 1)) ];
+    float v111 = v[(iV + 1) + (jV + 1)*W + (kV + 1)*(W*(H + 1)) ];
+    float vInterp = trilinearInterpolation(
+            fxV, fyV, fzV,
+            v000, v100, v001, v101,
+            v010, v110, v011, v111
+    );
+
+    // --- Интерполяция W (MAC-грань по Z) ---
+    // iW ∈ [0..W-1], jW ∈ [0..H-1], kW ∈ [0..D]
+    int iW = floorf(rx - 0.5f);
+    int jW = floorf(ry - 0.5f);
+    int kW = floorf(rz);
+    iW = min(max(iW, 0),     W - 1);
+    jW = min(max(jW, 0),     H - 1);
+    kW = min(max(kW, 0),     D);
+
+    float fxW = (rx - 0.5f) - iW;
+    float fyW = (ry - 0.5f) - jW;
+    float fzW = rz - kW;
+    fxW = fminf(fmaxf(fxW, 0.0f), 1.0f);
+    fyW = fminf(fmaxf(fyW, 0.0f), 1.0f);
+    fzW = fminf(fmaxf(fzW, 0.0f), 1.0f);
+
+    // idx_w(i,j,k) = i + j*W + k*(W*H)
+    int baseW = jW * W + kW * (W * H);
+    float w000 = w[ iW     + baseW ];
+    float w100 = w[(iW + 1) + baseW ];
+    float w010 = w[ iW     + (jW + 1)*W + kW*(W*H) ];
+    float w110 = w[(iW + 1) + (jW + 1)*W + kW*(W*H) ];
+    float w001 = w[ iW     + jW*W + (kW + 1)*(W*H) ];
+    float w101 = w[(iW + 1) + jW*W + (kW + 1)*(W*H) ];
+    float w011 = w[ iW     + (jW + 1)*W + (kW + 1)*(W*H) ];
+    float w111 = w[(iW + 1) + (jW + 1)*W + (kW + 1)*(W*H) ];
+    float wInterp = trilinearInterpolation(
+            fxW, fyW, fzW,
+            w000, w100, w001, w101,
+            w010, w110, w011, w111
+    );
+
+    return make_float3(uInterp, vInterp, wInterp);
 }
 
+// ----------------------------------
+// 2) Исправленный функтор явной адвекции (Runge-Kutta / Heun не нужен — используем адаптивный Эйлер)
 __device__
 bool projectParticleDevice3D(Utility::Particle3D &particle,
-                            const int* labels,
-                            int W,int H,int D, float dx)
+                             const int* labels,
+                             int W, int H, int D, float dx)
 {
-    // 26 соседей в 3D
-    const int off[26][3] = {
-        {-1,-1,-1},{-1,-1, 0},{-1,-1, 1},{-1, 0,-1},{-1, 0, 0},{-1, 0, 1},{-1, 1,-1},{-1, 1, 0},{-1, 1, 1},
-        { 0,-1,-1},{ 0,-1, 0},{ 0,-1, 1},{ 0, 0,-1},            { 0, 0, 1},{ 0, 1,-1},{ 0, 1, 0},{ 0, 1, 1},
-        { 1,-1,-1},{ 1,-1, 0},{ 1,-1, 1},{ 1, 0,-1},{ 1, 0, 0},{ 1, 0, 1},{ 1, 1,-1},{ 1, 1, 0},{ 1, 1, 1}
+    // 6 смежных соседей
+    const int off[6][3] = {
+            { 1, 0, 0}, {-1, 0, 0},
+            { 0, 1, 0}, { 0,-1, 0},
+            { 0, 0, 1}, { 0, 0,-1}
     };
 
-    // текущая ячейка
-    int cx = int(floorf(particle.pos.x/dx));
-    int cy = int(floorf(particle.pos.y/dx));
-    int cz = int(floorf(particle.pos.z/dx));
+    // Текущая клетка
+    int cx = int(floorf(particle.pos.x / dx));
+    int cy = int(floorf(particle.pos.y / dx));
+    int cz = int(floorf(particle.pos.z / dx));
 
     float3 bestPos = particle.pos;
     float  bestD   = 1e10f;
     bool   found   = false;
 
-    // сначала ищем SOLID, потом AIR
-    for(int pass=0;pass<2;++pass){
-        int want = (pass==0 ? Utility::SOLID : Utility::AIR);
-        for(int n=0;n<26;++n){
-            int nx = cx+off[n][0],
-                ny = cy+off[n][1],
-                nz = cz+off[n][2];
-            if(!isCellValid(nx,ny,nz,W,H,D)) continue;
+    // Сначала пытаемся найти соседнюю клетку со статусом SOLID, потом AIR
+    for (int pass = 0; pass < 2; ++pass) {
+        int want = (pass == 0 ? Utility::SOLID : Utility::AIR);
+        for (int n = 0; n < 6; ++n) {
+            int nx = cx + off[n][0];
+            int ny = cy + off[n][1];
+            int nz = cz + off[n][2];
+            if (nx < 0 || nx >= W || ny < 0 || ny >= H || nz < 0 || nz >= D) continue;
             int idx = nx + ny*W + nz*W*H;
-            if(labels[idx] != want) continue;
+            if (labels[idx] != want) continue;
 
-            float3 posC = make_float3(
-                (nx+0.5f)*dx,
-                (ny+0.5f)*dx,
-                (nz+0.5f)*dx
+            float3 cellC = make_float3(
+                    (nx + 0.5f) * dx,
+                    (ny + 0.5f) * dx,
+                    (nz + 0.5f) * dx
             );
-            float d = sqrtf((posC.x-particle.pos.x)*(posC.x-particle.pos.x)
-                        + (posC.y-particle.pos.y)*(posC.y-particle.pos.y)
-                        + (posC.z-particle.pos.z)*(posC.z-particle.pos.z));
-            if(d < bestD){
-                bestD = d;
-                bestPos = posC;
-                found = true;
+            float d = (cellC.x - particle.pos.x) * (cellC.x - particle.pos.x)
+                      + (cellC.y - particle.pos.y) * (cellC.y - particle.pos.y)
+                      + (cellC.z - particle.pos.z) * (cellC.z - particle.pos.z);
+            if (d < bestD) {
+                bestD   = d;
+                bestPos = cellC;
+                found   = true;
             }
         }
-        if(found) break;
+        if (found) break;
     }
-    if(!found) return false;
+    if (!found) return false;
 
-    // сдвигаем на 1.0*(bestPos - p.pos)
-    particle.pos.x = bestPos.x;
-    particle.pos.y = bestPos.y;
-    particle.pos.z = bestPos.z;
+    // Переносим частицу на центр найденной соседней клетки
+    particle.pos = bestPos;
     return true;
 }
 
@@ -684,34 +1093,37 @@ struct AdvectParticlesFunctor {
     const float* u;
     const float* v;
     const float* w;
-    const int* labels;
+    const int*   labels;
 
-    __host__ AdvectParticlesFunctor(float _dt,float _dx,float _C,
-                            int _W,int _H,int _D,
-                            const float* _u,const float* _v,const float* _w,
-                            const int*   _labels)
-        : dt(_dt), dx(_dx), C(_C),
-        W(_W), H(_H), D(_D),
-        u(_u), v(_v), w(_w),
-        labels(_labels) {}
+    __host__ __device__
+    AdvectParticlesFunctor(float _dt, float _dx, float _C,
+                           int _W, int _H, int _D,
+                           const float* _u, const float* _v, const float* _w,
+                           const int*   _labels)
+            : dt(_dt), dx(_dx), C(_C),
+              W(_W), H(_H), D(_D),
+              u(_u), v(_v), w(_w),
+              labels(_labels) {}
 
-    __device__ Utility::Particle3D operator()(const Utility::Particle3D& pin) const {
+    __device__
+    Utility::Particle3D operator()(const Utility::Particle3D& pin) const {
         Utility::Particle3D particle = pin;
         float subT = 0.0f;
-        bool finished = false;
-        int iter = 0;
-        while (!finished && iter++ < 100) {
-            // 1) Интерполируем скорость
-            float3 vel = interpVelDevice3D(u,v,w, W,H,D, dx, particle.pos);
+        bool  finished = false;
+        int   iter = 0;
 
-            // 2) Считаем dT
+        while (!finished && iter++ < 100) {
+            // 1) Интерполируем скорость из MAC-поля
+            float3 vel = interpVelDevice3D(u, v, w, W, H, D, dx, particle.pos);
+
+            // 2) Рассчитываем шаг dT по CFL-критерию
             float speed = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z) + 1e-37f;
             float dT = (C * dx) / speed;
             if (subT + dT >= dt) {
                 dT = dt - subT;
                 finished = true;
             } else if (subT + 2*dT >= dt) {
-                dT *= 0.5f;
+                dT *= 0.5f; // делим пополам, чтобы не выйти за dt
             }
 
             // 3) Явный Эйлер
@@ -720,45 +1132,54 @@ struct AdvectParticlesFunctor {
             particle.pos.z += vel.z * dT;
             subT += dT;
 
-            // 4) Границы и NaN
-            if (particle.pos.x < 0 || particle.pos.y < 0 || particle.pos.z < 0 ||
-                isnan(particle.pos.x) || isnan(particle.pos.y) || isnan(particle.pos.z)) {
+            // 4) Проверяем выход за нижние границы и NaN
+            if (particle.pos.x < 0.0f || particle.pos.y < 0.0f || particle.pos.z < 0.0f ||
+                isnan(particle.pos.x)  || isnan(particle.pos.y)  || isnan(particle.pos.z)) {
                 break;
             }
 
-            // 5) Попал в SOLID?
-            int cx = int(floorf(particle.pos.x/dx));
-            int cy = int(floorf(particle.pos.y/dx));
-            int cz = int(floorf(particle.pos.z/dx));
-            if (isCellValid(cx,cy,cz,W,H,D) &&
-                labels[idx3d(cx,cy,cz,W,H)] == Utility::SOLID)
-            {
-                if (!projectParticleDevice3D(particle, labels, W,H,D, dx))
-                    break;
+            // 5) Если частица попала в SOLID-клетку, пытаемся спроецировать её
+            int cx = int(floorf(particle.pos.x / dx));
+            int cy = int(floorf(particle.pos.y / dx));
+            int cz = int(floorf(particle.pos.z / dx));
+            if (cx >= 0 && cx < W && cy >= 0 && cy < H && cz >= 0 && cz < D) {
+                int idx = cx + cy*W + cz*W*H;
+                if (labels[idx] == Utility::SOLID) {
+                    if (!projectParticleDevice3D(particle, labels, W, H, D, dx))
+                        break;
+                }
             }
         }
+
         return particle;
     }
 };
 
-void FluidSolver3D::advectParticles(float C){
-
+// ----------------------------------
+// 3) Обновлённый метод FluidSolver3D::advectParticles
+void FluidSolver3D::advectParticles(float C)
+{
     const float* pu = u.device_ptr();
     const float* pv = v.device_ptr();
     const float* pw = w.device_ptr();
     const int*   pl = labels.device_ptr();
 
     thrust::transform(
-        d_particles.begin(),
-        d_particles.end(),
-        d_particles.begin(),
-        AdvectParticlesFunctor(
-            dt, dx, C,
-            gridWidth, gridHeight, gridDepth,
-            pu, pv, pw,
-            pl
-        )
+            d_particles.begin(),
+            d_particles.end(),
+            d_particles.begin(),
+            AdvectParticlesFunctor(
+                    dt, dx, C,
+                    gridWidth, gridHeight, gridDepth,
+                    pu, pv, pw,
+                    pl
+            )
     );
+
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cerr << "advectParticles() error: " << cudaGetErrorString(err) << std::endl;
+    }
 }
 
 
@@ -812,14 +1233,6 @@ struct CopyFluidRHSFunctor {
     }
 };
 
-struct FluidFlagFunctor {
-    __host__ __device__
-    int operator()(int label) const {
-        return label == Utility::FLUID ? 1 : 0;
-    }
-};
-
-
 
 struct FluidCellPredicate {
     const int* labels;
@@ -854,7 +1267,7 @@ struct ValueTransformer {
 void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs, const thrust::device_vector<int>& fluidNumbers, const thrust::device_vector<int>& fluidFlags) {
 
     float scale = (FLUID_DENSITY * dx) / dt;
-
+    //std::cout << "scale = " << scale << std::endl;
     thrust::device_vector<float> rhs_temp(w_x_h_x_d, 0.0f);
 
     thrust::for_each_n(
@@ -895,8 +1308,9 @@ void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs, const thrust
             IsSelected( flags_ptr)
     );
 
-    // Вывод результата
+     //Вывод результата
 //    thrust::host_vector<float> rhs_h = rhs;
+//    //rhs = thrust::device_vector<float>{4905, 4905, 4905, -4905, -4905, -4905};
 //    std::cout << "Copied values: ";
 //    for (float val : rhs_h) {
 //        std::cout << val << " ";
@@ -928,39 +1342,58 @@ void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs, const thrust
 
 struct MatrixBuilder3D {
     int W, H, D;
-    const int* labels;
-    const int* fluidNumbers;
-    int* nnz_per_row;
+    const int* labels;        // метки ячеек
+    const int* fluidNumbers;   // mapping global idx → local idx (или −1)
+    int*       nnz_per_row;    // выход: сколько ненулей у строки “row”
 
     __device__ void operator()(int idx) const {
+        // 1) перевод idx → (i,j,k)
         int i = idx % W;
         int j = (idx / W) % H;
         int k = idx / (W * H);
 
+        // 2) работаем только для FLUID-ячейки
         if (labels[idx] != Utility::FLUID) return;
 
-        int row = fluidNumbers[idx];
-        int count = 1; // Диагональный элемент
+        int row = fluidNumbers[idx];   // локальный номер этой ячейки
+        int count = 1;                 // учитываем диагональный элемент
 
-        // 6 направлений соседей
-        const int offsets[6][3] = {
-                {1,0,0}, {-1,0,0},
-                {0,1,0}, {0,-1,0},
-                {0,0,1}, {0,0,-1}
+        // 3) 6 соседей по x,y,z
+        const int off[6][3] = {
+                { 1,  0,  0}, {-1,  0,  0},
+                { 0,  1,  0}, { 0, -1,  0},
+                { 0,  0,  1}, { 0,  0, -1}
         };
 
-        for (int n = 0; n < 6; n++) {
-            int ni = i + offsets[n][0];
-            int nj = j + offsets[n][1];
-            int nk = k + offsets[n][2];
+        for (int n = 0; n < 6; ++n) {
+            int ni = i + off[n][0];
+            int nj = j + off[n][1];
+            int nk = k + off[n][2];
+            // проверяем границы
+            if (ni < 0 || ni >= W ||
+                nj < 0 || nj >= H ||
+                nk < 0 || nk >= D) continue;
 
-            if (ni >= 0 && ni < W && nj >= 0 && nj < H && nk >= 0 && nk < D) {
-                int nidx = ni + nj * W + nk * W * H;
-                if (labels[nidx] == Utility::FLUID && fluidNumbers[nidx] > row) {
+            int nidx = ni + nj * W + nk * (W * H);
+
+            //  -- если сосед FLUID и fluidNumbers[nidx] > row,
+            //     значит мы храним только “верхний треугольник” (симметрично)
+            if (labels[nidx] == Utility::FLUID) {
+                int nrow = fluidNumbers[nidx];
+                if (nrow > row) {
                     count++;
                 }
             }
+            //  -- если сосед не SOLID (то есть FLUID или AIR),
+            //     но мы всё равно добавляем вклад в диагональ,
+            //     но не добавляем off-diagonal
+            //     (поскольку AIR не даёт off-diagonal,
+            //      а SOLID вообще не считается).
+            //    Это справедливо, потому что
+            //    для AIR → только диагональный вклад,
+            //    а off-diagonal (сосед) не появляется в CSR.
         }
+
         nnz_per_row[row] = count;
     }
 };
@@ -1081,6 +1514,11 @@ void FluidSolver3D::constructA(
     );
 
     csr_offsets.back() = csr_values.size();
+
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cerr << "ConstructA error: " << cudaGetErrorString(err) << std::endl;
+    }
 }
 
 
@@ -1101,6 +1539,23 @@ struct GlobalToLocal {
         return 0.0f; // Значение по умолчанию
     }
 };
+
+// Функтор для пометки не-FLUID ячеек (flags[idx]==0) значением −1 в fluidNumbers_d
+struct MarkNonFluidFunctor {
+    const int* flags;      // указатель на массив flags
+    int*       fluidNums;  // указатель на массив fluidNumbers_d
+
+    MarkNonFluidFunctor(const int* _flags, int* _fluidNums)
+            : flags(_flags), fluidNums(_fluidNums) {}
+
+    __host__ __device__
+    void operator()(int idx) const {
+        if (flags[idx] == 0) {
+            fluidNums[idx] = -1;
+        }
+    }
+};
+
 
 int FluidSolver3D::pressureSolve() {
 
@@ -1141,7 +1596,16 @@ int FluidSolver3D::pressureSolve() {
             flags.begin(), flags.end(),
             fluidNumbers_d.begin()
     );
-
+    // После этого нужно “записать -1” для тех клеток, где flags[idx]==0:
+//    thrust::for_each(
+//            thrust::device,
+//            thrust::make_counting_iterator<int>(0),
+//            thrust::make_counting_iterator<int>(w_x_h_x_d),
+//            MarkNonFluidFunctor(
+//                    thrust::raw_pointer_cast(flags.data()),
+//                    thrust::raw_pointer_cast(fluidNumbers_d.data())
+//            )
+//    );
     //std::cout << "last number = " << fluidNumbers_d[w_x_h_x_d-1] << std::endl;
     //fluidCellsAmount = fluidNumbers_d[w_x_h_x_d-1];
     //  Подсчет количества жидких ячеек
@@ -1175,7 +1639,8 @@ int FluidSolver3D::pressureSolve() {
 //    thrust::host_vector<float> rhs = rhs_d;
 //    for(int j = 0; j < gridHeight; ++j){
 //        for(int i = 0; i < gridWidth; ++i){
-//            std::cout << rhs[i + j*gridWidth] << ", ";
+//            if(i + j*gridWidth < rhs.size())
+//                std::cout << rhs[i + j*gridWidth] << ", ";
 //        }
 //        std::cout << std::endl;
 //    }
@@ -1218,7 +1683,7 @@ int FluidSolver3D::pressureSolve() {
             &A,
             fluidCellsAmount, fluidCellsAmount, nnz,
             thrust::raw_pointer_cast(csr_offsets.data()),
-            nullptr,
+            NULL,
             thrust::raw_pointer_cast(csr_columns.data()),
             thrust::raw_pointer_cast(csr_values.data()),
             CUDA_R_32I, CUDA_R_32F,
@@ -1234,7 +1699,7 @@ int FluidSolver3D::pressureSolve() {
 //    thrust::host_vector<float> csr_vals_h = csr_values;
 //    thrust::host_vector<float> csr_cols_h = csr_columns;
 //    thrust::host_vector<float> csr_offs_h = csr_offsets;
-//
+
 //    for(int i = 0; i < csr_vals_h.size(); ++i){
 //        std::cout << csr_vals_h[i] << ", ";
 //    }
@@ -1252,7 +1717,6 @@ int FluidSolver3D::pressureSolve() {
     // решение Системы линейных алгебраических уравнений с разреженной матрицей
     thrust::device_vector<float> solution(fluidCellsAmount);
 
-
     cudssMatrix_t x, b;
 
     status = cudssMatrixCreateDn(
@@ -1268,8 +1732,6 @@ int FluidSolver3D::pressureSolve() {
     );
 
     // Решение системы
-
-
     // Анализ
     status = cudssExecute(handle, CUDSS_PHASE_ANALYSIS,
                           solverConfig, solverData, A, x, b);
@@ -1281,6 +1743,21 @@ int FluidSolver3D::pressureSolve() {
     // Решение
     status = cudssExecute(handle, CUDSS_PHASE_SOLVE,
                           solverConfig, solverData, A, x, b);
+
+    status = cudssMatrixDestroy(A);
+    status = cudssMatrixDestroy(b);
+    status = cudssMatrixDestroy(x);
+    cudssDataDestroy(handle, solverData);
+    cudssConfigDestroy(solverConfig);
+    cudssDestroy(handle);
+    cudaStreamSynchronize(stream);
+
+    std::cout << "----solution local---" << std::endl;
+    thrust::host_vector<float> sol_h = solution;
+    for(int k = 0; k < sol_h.size(); ++k){
+        std::cout << sol_h[k] << ", ";
+    }
+    std::cout << std::endl;
 
     //  Копирование решения в сетку давления
     thrust::device_vector<float> p_temp(w_x_h_x_d, 0.0f);
@@ -1319,131 +1796,220 @@ int FluidSolver3D::pressureSolve() {
 //    }
 
 
-    status = cudssMatrixDestroy(A);
-    status = cudssMatrixDestroy(b);
-    status = cudssMatrixDestroy(x);
-    cudssDataDestroy(handle, solverData);
-    cudssConfigDestroy(solverConfig);
-    cudssDestroy(handle);
-    cudaStreamSynchronize(stream);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cerr << "PressureSolve() error: " << cudaGetErrorString(err) << std::endl;
+        return -1;
+    }
 
     return 0;
 }
 
-struct UFunctor {
-    float* u;
-    const float* p;
-    const int* labels;
-    float scale;
-    int W, H, D;
-    float VEL_UNKNOWN;
+// ----------------------------------
+// Утилитарная функция для преобразования из 3D-индекса (i,j,k) в линейный (cell-centered)
+__device__ __host__
+inline int cellIdx(int i, int j, int k, int W, int H) {
+    // Ячейки размером W × H × D
+    return i + j * W + k * (W * H);
+}
 
-    UFunctor(float* u_, const float* p_, const int* labels_, float scale_,
-             int W_, int H_, int D_, float vel_unknown)
+// ----------------------------------
+// Функтор для коррекции U-скоростей (MAC-грань по X)
+// uSize = (W+1) × H × D
+struct UFunctor {
+    float*       u;          // массив U-скоростей (face-centered по X), размер (W+1)*H*D
+    const float* p;          // массив давлений на центрах ячеек, размер W*H*D
+    const int*   labels;     // метки ячеек (AIR, FLUID, SOLID), размер W*H*D
+    float        scale;      // = dt / (ρ * dx)
+    int          W, H, D;    // размеры сетки (ячейки): W × H × D
+    float        VEL_UNKNOWN;
+
+    UFunctor(float*       u_,
+             const float* p_,
+             const int*   labels_,
+             float        scale_,
+             int          W_,
+             int          H_,
+             int          D_,
+             float        vel_unknown)
             : u(u_), p(p_), labels(labels_), scale(scale_),
               W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
 
     __host__ __device__
     void operator()(int idx) const {
-        int k = idx / ((W+1) * H);
-        int j = (idx % ((W+1) * H)) / (W+1);
-        int i = (idx % ((W+1) * H)) % (W+1);
+        // Получаем трёхмерные индексы (iU, jU, kU) для u:
+        // где iU ∈ [0..W], jU ∈ [0..H-1], kU ∈ [0..D-1]
+        int sliceSize = (W + 1) * H;        // размер “плоскости” (iU + jU*(W+1)) для каждого kU
+        int kU = idx / sliceSize;
+        int rem = idx % sliceSize;
+        int jU = rem / (W + 1);
+        int iU = rem % (W + 1);
 
-        if (i > 0 && i < W) {
-            int left = (i-1) + j*W + k*W*H;
-            int right = i + j*W + k*W*H;
+        // Коррекцию u делаем только для внутренних граней: iU от 1 до W-1
+        if (iU > 0 && iU < W) {
+            // Соответствующие “левые” и “правые” ячейки:
+            // leftCell  = (iU-1, jU, kU)
+            // rightCell = (iU,   jU, kU)
+            int leftIdx  = cellIdx(iU - 1, jU, kU, W, H);
+            int rightIdx = cellIdx(iU    , jU, kU, W, H);
 
-            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID) {
-                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID) {
+            bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
+            bool rightFluid = (labels[rightIdx] == Utility::FLUID);
+            bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
+            bool rightSolid = (labels[rightIdx] == Utility::SOLID);
+
+            if (leftFluid || rightFluid) {
+                // Если хотя бы один сосед FLUID, но нет SOLID — корректируем
+                if (leftSolid || rightSolid) {
+                    // Грань у стены — обнуляем скорость
                     u[idx] = 0.0f;
                 } else {
-                    u[idx] -= scale * (p[right] - p[left]);
+                    // Коррекция по градиенту: u ← u − scale * (p[right] − p[left])
+                    float dp = p[rightIdx] - p[leftIdx];
+                    u[idx] -= scale * dp;
                 }
-            } else {
-                u[idx] = VEL_UNKNOWN;
+                return;
             }
         }
+        // Во всех остальных случаях (грань между AIR или на границе) помечаем неизвестной
+        u[idx] = 0.0f;
     }
 };
 
+// ----------------------------------
+// Функтор для коррекции V-скоростей (MAC-грань по Y)
+// vSize = W × (H+1) × D
 struct VFunctor {
-    float* v;
+    float*       v;
     const float* p;
-    const int* labels;
-    float scale;
-    int W, H, D;
-    float VEL_UNKNOWN;
+    const int*   labels;
+    float        scale;
+    int          W, H, D;
+    float        VEL_UNKNOWN;
 
-    VFunctor(float* v_, const float* p_, const int* labels_, float scale_,
-             int W_, int H_, int D_, float vel_unknown)
+    VFunctor(float*       v_,
+             const float* p_,
+             const int*   labels_,
+             float        scale_,
+             int          W_,
+             int          H_,
+             int          D_,
+             float        vel_unknown)
             : v(v_), p(p_), labels(labels_), scale(scale_),
               W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
 
     __host__ __device__
     void operator()(int idx) const {
-        int k = idx / (W * (H+1));
-        int j = (idx % (W * (H+1))) / W;
-        int i = (idx % (W * (H+1))) % W;
+        // iV ∈ [0..W-1], jV ∈ [0..H], kV ∈ [0..D-1]
+        int sliceSize = W * (H + 1);
+        int kV = idx / sliceSize;
+        int rem = idx % sliceSize;
+        int jV = rem / W;
+        int iV = rem % W;
 
-        if (j > 0 && j < H) {
-            int left = i + (j-1)*W + k*W*H;
-            int right = i + j*W + k*W*H;
+        // Коррекция только для внутренних граней: jV от 1 до H-1
+        if (jV > 0 && jV < H) {
+            // leftCell  = (iV, jV-1, kV)
+            // rightCell = (iV, jV,   kV)
+            int leftIdx  = cellIdx(iV, jV - 1, kV, W, H);
+            int rightIdx = cellIdx(iV, jV    , kV, W, H);
 
-            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID) {
-                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID) {
+            bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
+            bool rightFluid = (labels[rightIdx] == Utility::FLUID);
+            bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
+            bool rightSolid = (labels[rightIdx] == Utility::SOLID);
+
+            if (leftFluid || rightFluid) {
+                if (leftSolid || rightSolid) {
                     v[idx] = 0.0f;
                 } else {
-                    v[idx] -= scale * (p[right] - p[left]);
+                    float dp = p[rightIdx] - p[leftIdx];
+                    v[idx] -= scale * dp;
                 }
-            } else {
-                v[idx] = VEL_UNKNOWN;
+                return;
             }
         }
+        v[idx] = 0.0f;
     }
 };
 
+// ----------------------------------
+// Функтор для коррекции W-скоростей (MAC-грань по Z)
+// wSize = W × H × (D+1)
 struct WFunctor {
-    float* w;
+    float*       w;
     const float* p;
-    const int* labels;
-    float scale;
-    int W, H, D;
-    float VEL_UNKNOWN;
+    const int*   labels;
+    float        scale;
+    int          W, H, D;
+    float        VEL_UNKNOWN;
 
-    WFunctor(float* w_, const float* p_, const int* labels_, float scale_,
-             int W_, int H_, int D_, float vel_unknown)
+    WFunctor(float*       w_,
+             const float* p_,
+             const int*   labels_,
+             float        scale_,
+             int          W_,
+             int          H_,
+             int          D_,
+             float        vel_unknown)
             : w(w_), p(p_), labels(labels_), scale(scale_),
               W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
 
     __host__ __device__
     void operator()(int idx) const {
-        int k = idx / (W * H);
-        int j = (idx % (W * H)) / W;
-        int i = (idx % (W * H)) % W;
+        // iW ∈ [0..W-1], jW ∈ [0..H-1], kW ∈ [0..D]
+        int sliceSize = W * H;
+        int kW = idx / sliceSize;
+        int rem = idx % sliceSize;
+        int jW = rem / W;
+        int iW = rem % W;
 
-        if (k > 0 && k < D) {
-            int left = i + j*W + (k-1)*W*H;
-            int right = i + j*W + k*W*H;
+        // Коррекция только для внутренних граней: kW от 1 до D-1
+        if (kW > 0 && kW < D) {
+            // leftCell  = (iW, jW, kW-1)
+            // rightCell = (iW, jW, kW)
+            int leftIdx  = cellIdx(iW, jW, kW - 1, W, H);
+            int rightIdx = cellIdx(iW, jW, kW    , W, H);
 
-            if(labels[left] == Utility::FLUID || labels[right] == Utility::FLUID) {
-                if(labels[left] == Utility::SOLID || labels[right] == Utility::SOLID) {
+            bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
+            bool rightFluid = (labels[rightIdx] == Utility::FLUID);
+            bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
+            bool rightSolid = (labels[rightIdx] == Utility::SOLID);
+
+            if (leftFluid || rightFluid) {
+                if (leftSolid || rightSolid) {
                     w[idx] = 0.0f;
                 } else {
-                    w[idx] -= scale * (p[right] - p[left]);
+                    float dp = p[rightIdx] - p[leftIdx];
+                    w[idx] -= scale * dp;
                 }
-            } else {
-                w[idx] = VEL_UNKNOWN;
+                return;
             }
         }
+        w[idx] = 0.0f;
     }
 };
 
+// ----------------------------------
+// 4) Обновлённый метод FluidSolver3D::applyPressure()
 void FluidSolver3D::applyPressure() {
-    float scale = dt / (FLUID_DENSITY * dx);
-    float vel_unknown = (float)VEL_UNKNOWN; // Предполагается, что VEL_UNKNOWN определен
+    float scale        = dt / (FLUID_DENSITY * dx);
+    float vel_unknown  = static_cast<float>(VEL_UNKNOWN);
 
-    // Обработка u-компоненты
-    int u_size = (gridWidth+1) * gridHeight * gridDepth;
+//    std::cout << "----pressure 3d---" << std::endl;
+//    p.host_data = p.device_data;
+//    for(int k = 0; k < gridDepth; ++k){
+//        for(int j = 0; j < gridHeight; ++j){
+//            for(int i = 0; i < gridWidth; ++i){
+//                std::cout << p.host_data[i + j*gridWidth + k * gridWidth*gridHeight] << ", ";
+//            }
+//            std::cout << std::endl;
+//        }
+//        std::cout <<"\n"<< std::endl;
+//    }
+
+    // --- Коррекция U-скоростей ---
+    int u_size = (gridWidth + 1) * gridHeight * gridDepth;
     thrust::for_each(
             thrust::device,
             thrust::make_counting_iterator(0),
@@ -1453,13 +2019,28 @@ void FluidSolver3D::applyPressure() {
                     p.device_ptr(),
                     labels.device_ptr(),
                     scale,
-                    gridWidth, gridHeight, gridDepth,
+                    gridWidth,
+                    gridHeight,
+                    gridDepth,
                     vel_unknown
             )
     );
 
-    // Обработка v-компоненты
-    int v_size = gridWidth * (gridHeight+1) * gridDepth;
+//        u.copy_to_host();
+//        std::cout << "----u 3d (after pressure apply)---" << std::endl;
+//    for(int k = 0; k < gridDepth; ++k){
+//        for(int j = 0; j < gridHeight; ++j){
+//            for(int i = 0; i < gridWidth+1; ++i){
+//                std::cout << u.host_data[i + j*(gridWidth+1) + k * (gridWidth+1)*gridHeight] << ", ";
+//            }
+//            std::cout << std::endl;
+//        }
+//        std::cout << std::endl;
+//    }
+
+
+    // --- Коррекция V-скоростей ---
+    int v_size = gridWidth * (gridHeight + 1) * gridDepth;
     thrust::for_each(
             thrust::device,
             thrust::make_counting_iterator(0),
@@ -1469,13 +2050,27 @@ void FluidSolver3D::applyPressure() {
                     p.device_ptr(),
                     labels.device_ptr(),
                     scale,
-                    gridWidth, gridHeight, gridDepth,
+                    gridWidth,
+                    gridHeight,
+                    gridDepth,
                     vel_unknown
             )
     );
 
-    // Обработка w-компоненты
-    int w_size = gridWidth * gridHeight * (gridDepth+1);
+//        v.copy_to_host();
+//    std::cout << "----v 3d (after pressure apply)---" << std::endl;
+//    for(int k = 0; k < gridDepth; ++k){
+//        for(int j = 0; j < gridHeight+1; ++j){
+//            for(int i = 0; i < gridWidth; ++i){
+//                std::cout << v.host_data[i + j*(gridWidth) + k * (gridWidth)*(gridHeight+1)] << ", ";
+//            }
+//            std::cout << std::endl;
+//        }
+//        std::cout << std::endl;
+//    }
+
+    // --- Коррекция W-скоростей ---
+    int w_size = gridWidth * gridHeight * (gridDepth + 1);
     thrust::for_each(
             thrust::device,
             thrust::make_counting_iterator(0),
@@ -1485,10 +2080,30 @@ void FluidSolver3D::applyPressure() {
                     p.device_ptr(),
                     labels.device_ptr(),
                     scale,
-                    gridWidth, gridHeight, gridDepth,
+                    gridWidth,
+                    gridHeight,
+                    gridDepth,
                     vel_unknown
             )
     );
+
+//        w.copy_to_host();
+//    std::cout << "----w 3d (after pressure apply)---" << std::endl;
+//    for(int k = 0; k < gridDepth+1; ++k){
+//        for(int j = 0; j < gridHeight; ++j){
+//            for(int i = 0; i < gridWidth; ++i){
+//                std::cout << w.host_data[i + j*(gridWidth) + k * (gridWidth)*(gridHeight)] << ", ";
+//            }
+//            std::cout << std::endl;
+//        }
+//        std::cout << std::endl;
+//    }
+
+    // Проверка ошибок CUDA
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cerr << "applyPressure() error: " << cudaGetErrorString(err) << std::endl;
+    }
 }
 
 __host__ void FluidSolver3D::frameStep(){
@@ -1502,11 +2117,8 @@ __host__ void FluidSolver3D::frameStep(){
 
     //applying body forces on grid (e.g. gravity force)
     applyForces();
-    cudaDeviceSynchronize();
     pressureSolve();
-    cudaDeviceSynchronize();
-    //applyPressure();
-
+    applyPressure();
     //grid velocities to particles
     gridToParticles(PIC_WEIGHT);
 

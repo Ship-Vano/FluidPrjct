@@ -379,6 +379,23 @@ void FluidSolver2D::applyForces() {
             }
         }
     }
+
+//    std::cout << "----u 2d---" << std::endl;
+//        for(int j = 0; j < gridHeight; ++j){
+//            for(int i = 0; i <= gridWidth; ++i){
+//                std::cout << u[i + j*(gridWidth+1)] << ", ";
+//            }
+//            std::cout << std::endl;
+//        }
+//        std::cout << std::endl;
+//    std::cout << "----v 2d---" << std::endl;
+//    for(int j = 0; j < gridHeight+1; ++j){
+//        for(int i = 0; i < gridWidth; ++i){
+//            std::cout << u[i + j*(gridWidth)] << ", ";
+//        }
+//        std::cout << std::endl;
+//    }
+//    std::cout << std::endl;
 }
 
 
@@ -389,6 +406,14 @@ void FluidSolver2D::applyForces() {
  * ########################################
  * */
 void FluidSolver2D::constructRHS(std::vector<float>& rhs){
+//    std::cout << "----v 2d---" << std::endl;
+//    for(int j = 0; j < gridHeight+1; ++j){
+//        for(int i = 0; i < gridWidth; ++i){
+//            std::cout << v[i + j*(gridWidth)] << ", ";
+//        }
+//        std::cout << std::endl;
+//    }
+//    std::cout << std::endl;
     // calculate negative divergence
     //float scale = 1.0f / dx;
     float scale = (FLUID_DENSITY * dx) / dt;
@@ -420,6 +445,7 @@ void FluidSolver2D::constructRHS(std::vector<float>& rhs){
                     //rhs[i*gridHeight+j] += scale * (v[i*gridHeight+(j + 1)] - 0.0f); //m_vsolid[i][j+1]
                     rhs[newFluidInd] += scale * (v[i+(j + 1)*gridWidth] - 0.0f);
                 }
+                //std::cout << "rhs[" << newFluidInd << "]= " << rhs[newFluidInd]<< std::endl;
             }
         }
     }
@@ -659,24 +685,30 @@ int FluidSolver2D::pressureSolve() {
     CUDA_CALL_AND_CHECK(cudaMemcpy(x_values_h, x_values_d, nrhs * n * sizeof(float),
                                    cudaMemcpyDeviceToHost), "cudaMemcpy for x_values");
 
-
-    for(int j = 0; j < gridHeight; ++j){
-        for(int i = 0; i < gridWidth; ++i){
-            std::cout << rhs[i + j*gridWidth] << ", ";
-        }
-        std::cout << std::endl;
+    std::cout << "----solution local 2d---" << std::endl;
+    for(int k = 0; k < fluidCellsAmount; ++k){
+        std::cout << x_values_h[k] << ", ";
     }
+    std::cout << std::endl;
+    std::cout << "-------" << std::endl;
+
+//    for(int j = 0; j < gridHeight; ++j){
+//        for(int i = 0; i < gridWidth; ++i){
+//            std::cout << rhs[i + j*gridWidth] << ", ";
+//        }
+//        std::cout << std::endl;
+//    }
     /* Release the data allocated on the user side */
-    std::cout << "----pressure 2d---" << std::endl;
+    //std::cout << "----pressure 2d---" << std::endl;
     for(int j = 0; j < gridHeight; ++j){
         for(int i = 0; i < gridWidth; ++i){
             int newFluidInd = fluidNumbers[i+ j*gridWidth];
             if(newFluidInd != -1){
                 p[i + j*gridWidth] = x_values_h[newFluidInd];
             }
-            std::cout << p[i + j*gridWidth] << ", ";
+            //std::cout << p[i + j*gridWidth] << ", ";
         }
-        std::cout << std::endl;
+        //std::cout << std::endl;
     }
 
     CUDSS_EXAMPLE_FREE;
@@ -723,6 +755,23 @@ void FluidSolver2D::applyPressure() {
             }
         }
     }
+
+        std::cout << "----u 2d (after pressure apply)---" << std::endl;
+        for(int j = 0; j < gridHeight; ++j){
+            for(int i = 0; i <= gridWidth; ++i){
+                std::cout << u[i + j*(gridWidth+1)] << ", ";
+            }
+            std::cout << std::endl;
+        }
+        std::cout << std::endl;
+    std::cout << "----v 2d (after pressure apply)---" << std::endl;
+    for(int j = 0; j < gridHeight+1; ++j){
+        for(int i = 0; i < gridWidth; ++i){
+            std::cout <<  v[i + j*(gridWidth)] << ", ";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << std::endl;
 }
 
 
@@ -1257,8 +1306,8 @@ void FluidSolver2D::frameStep(){
     particlesToGrid();
 
     // экстраполяция в пределах +одна ячейка (для аккуратной очистки дивергенции)
-    extrapolateGridFluidData(u, gridWidth + 1, gridHeight, 2);
-    extrapolateGridFluidData(v, gridWidth, gridHeight + 1, 2);
+    //extrapolateGridFluidData(u, gridWidth + 1, gridHeight, 2);
+    //extrapolateGridFluidData(v, gridWidth, gridHeight + 1, 2);
 
     //saving a copy of the current grid velocities (for FLIP)
     saveVelocities();
@@ -1273,8 +1322,8 @@ void FluidSolver2D::frameStep(){
     gridToParticles(PIC_WEIGHT);
 
     //advection of particles
-    extrapolateGridFluidData(u, gridWidth + 1, gridHeight, gridWidth);
-    extrapolateGridFluidData(v, gridWidth, gridHeight + 1, gridHeight);
+    //extrapolateGridFluidData(u, gridWidth + 1, gridHeight, gridWidth);
+    //extrapolateGridFluidData(v, gridWidth, gridHeight + 1, gridHeight);
     advectParticles(ADVECT_MAX);
 
     //boundary penetration detection (if so --- move back inside)
