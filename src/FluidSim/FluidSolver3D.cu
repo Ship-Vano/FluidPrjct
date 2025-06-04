@@ -711,7 +711,7 @@ struct GridToParticleFunctor
         iU = min(max(iU, 0),     W);
         jU = min(max(jU, 0),     H - 1);
         kU = min(max(kU, 0),     D - 1);
-        // дробные части внутри “ячейки” U
+        // дробные части внутри “ячейки” U (координаты относительно ячейки)
         float fxU = rx - iU;
         float fyU = (ry - 0.5f) - jU;
         float fzU = (rz - 0.5f) - kU;
@@ -1037,11 +1037,21 @@ bool projectParticleDevice3D(Utility::Particle3D &particle,
                              const int* labels,
                              int W, int H, int D, float dx)
 {
-    // 6 смежных соседей
-    const int off[6][3] = {
+    // 26 соседей
+    const int off[26][3] = {
             { 1, 0, 0}, {-1, 0, 0},
             { 0, 1, 0}, { 0,-1, 0},
-            { 0, 0, 1}, { 0, 0,-1}
+            { 0, 0, 1}, { 0, 0,-1},
+            {1, 1, 0}, {-1, 1, 0},
+            {1, -1, 0}, {-1, -1},
+            {1, 0, 1}, {-1, 0, 1},
+            {1, 0, -1}, {-1, 0, -1},
+            {0, 1, 1}, {0, -1, 1},
+            {0, 1, -1}, {0, -1, -1},
+            {1, 1, 1}, {-1, 1, 1},
+            {1, -1, 1}, {1, 1, -1},
+            {-1, -1, 1}, {-1, 1, -1},
+            {1, -1, -1}, {-1, -1, -1}
     };
 
     // Текущая клетка
@@ -1050,32 +1060,34 @@ bool projectParticleDevice3D(Utility::Particle3D &particle,
     int cz = int(floorf(particle.pos.z / dx));
 
     float3 bestPos = particle.pos;
-    float  bestD   = 1e10f;
+    float  bestD   = fmaxf(W, H) * dx; //1e10f;
     bool   found   = false;
-
-    // Сначала пытаемся найти соседнюю клетку со статусом SOLID, потом AIR
+    int foundNeigInd = 0;
+    //ищем наименьшее расстояние до твёрдой ячейки, не нашли, тогда до ближайшей воздушной
+    // Сначала пытаемся найти соседнюю клетку со статусом FLUID, потом AIR
     for (int pass = 0; pass < 2; ++pass) {
-        int want = (pass == 0 ? Utility::SOLID : Utility::AIR);
-        for (int n = 0; n < 6; ++n) {
+        int wanted = (pass == 0 ? Utility::FLUID : Utility::AIR);
+        for (int n = 0; n < 26; ++n) {
             int nx = cx + off[n][0];
             int ny = cy + off[n][1];
             int nz = cz + off[n][2];
-            if (nx < 0 || nx >= W || ny < 0 || ny >= H || nz < 0 || nz >= D) continue;
+            if (nx < 0 || nx >= W || ny < 0 || ny >= H || nz < 0 || nz >= D) continue; 
             int idx = nx + ny*W + nz*W*H;
-            if (labels[idx] != want) continue;
+            if (labels[idx] != wanted) continue;
 
             float3 cellC = make_float3(
                     (nx + 0.5f) * dx,
                     (ny + 0.5f) * dx,
                     (nz + 0.5f) * dx
-            );
+            );  //координаты центра ячейки
             float d = (cellC.x - particle.pos.x) * (cellC.x - particle.pos.x)
                       + (cellC.y - particle.pos.y) * (cellC.y - particle.pos.y)
-                      + (cellC.z - particle.pos.z) * (cellC.z - particle.pos.z);
+                      + (cellC.z - particle.pos.z) * (cellC.z - particle.pos.z); //квадрат расстояния от положения частицы до центра ячейки 
             if (d < bestD) {
                 bestD   = d;
                 bestPos = cellC;
                 found   = true;
+                foundNeigInd = n;
             }
         }
         if (found) break;
@@ -1084,6 +1096,14 @@ bool projectParticleDevice3D(Utility::Particle3D &particle,
 
     // Переносим частицу на центр найденной соседней клетки
     particle.pos = bestPos;
+
+    // во избежание накопления частиц в центрах ячеек:
+    thrust::default_random_engine randEng;
+    thrust::uniform_real_distribution<float> uniDist(-1.0f, 1.0f);
+    randEng.discard(foundNeigInd);
+    particle.pos.x += uniDist(randEng) * 0.25f * dx;
+    particle.pos.y += uniDist(randEng) * 0.25f * dx;
+    particle.pos.z += uniDist(randEng) * 0.25f * dx;
     return true;
 }
 
@@ -1108,17 +1128,18 @@ struct AdvectParticlesFunctor {
     __device__
     Utility::Particle3D operator()(const Utility::Particle3D& pin) const {
         Utility::Particle3D particle = pin;
-        float subT = 0.0f;
+        float subT = 0.0f; //локальный отсчёт времени (глобальный шаг dt дробим на шаги dT)
         bool  finished = false;
         int   iter = 0;
 
         while (!finished && iter++ < 100) {
             // 1) Интерполируем скорость из MAC-поля
             float3 vel = interpVelDevice3D(u, v, w, W, H, D, dx, particle.pos);
-
+                
             // 2) Рассчитываем шаг dT по CFL-критерию
-            float speed = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z) + 1e-37f;
-            float dT = (C * dx) / speed;
+            //" It has been suggested[FF01] that an appropriate strategy is to limit dT so that the furthest a particle trajectory is traced is five grid cell widths:
+            float speed = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z) +1e-37f/*+ sqrtf(5.0f * dx * 9.8f)*/; 
+            float dT = (C * dx) / speed; //шаг по времени находим из критерия Куранта
             if (subT + dT >= dt) {
                 dT = dt - subT;
                 finished = true;
@@ -1126,26 +1147,34 @@ struct AdvectParticlesFunctor {
                 dT *= 0.5f; // делим пополам, чтобы не выйти за dt
             }
 
-            // 3) Явный Эйлер
+            // 3) Явный Эйлер (возможно, стоит поменять на RK3, как это советует R. Bridson...)
             particle.pos.x += vel.x * dT;
             particle.pos.y += vel.y * dT;
             particle.pos.z += vel.z * dT;
             subT += dT;
 
+            particle.pos.x = fmaxf(particle.pos.x, 0.0f);
+            particle.pos.x = fminf(particle.pos.x, (W-1)*dx);
+            particle.pos.y = fmaxf(particle.pos.y, 0.0f);
+            particle.pos.y = fminf(particle.pos.y, (H-1)*dx);
+            particle.pos.z = fmaxf(particle.pos.z, 0.0f);
+            particle.pos.z = fminf(particle.pos.z, (D-1)*dx);
+
             // 4) Проверяем выход за нижние границы и NaN
             if (particle.pos.x < 0.0f || particle.pos.y < 0.0f || particle.pos.z < 0.0f ||
                 isnan(particle.pos.x)  || isnan(particle.pos.y)  || isnan(particle.pos.z)) {
+                    //возможно, стоит придумать, как обрабатывать такой случай
                 break;
             }
 
-            // 5) Если частица попала в SOLID-клетку, пытаемся спроецировать её
+            // 5) Если частица попала в SOLID-клетку, пытаемся спроецировать её в соседнюю
             int cx = int(floorf(particle.pos.x / dx));
             int cy = int(floorf(particle.pos.y / dx));
             int cz = int(floorf(particle.pos.z / dx));
             if (cx >= 0 && cx < W && cy >= 0 && cy < H && cz >= 0 && cz < D) {
                 int idx = cx + cy*W + cz*W*H;
-                if (labels[idx] == Utility::SOLID) {
-                    if (!projectParticleDevice3D(particle, labels, W, H, D, dx))
+                if (labels[idx] == Utility::SOLID) {//проверка на попадание в твёрдую границу 
+                    if (!projectParticleDevice3D(particle, labels, W, H, D, dx)) //насильно отбрасываем в FLUID (приоритетнее) или в AIR ячейку
                         break;
                 }
             }
@@ -1201,11 +1230,12 @@ struct RHSCalculator3D {
                 u[(i+1) + j*(W+1) + k*(W+1)*H] - u[i + j*(W+1) + k*(W+1)*H] +
                 v[i + (j+1)*W + k*W*(H+1)] - v[i + j*W + k*W*(H+1)] +
                 w[i + j*W + (k+1)*W*H] - w[i + j*W + k*W*H];
+
         float rhs_val = -scale * div;
 
         // Solid boundaries
         if (i-1 >= 0 && labels[idx-1] == Utility::SOLID)
-            rhs_val -= scale * (u[i + j*(W+1) + k*(W+1)*H] - 0.0f);
+            rhs_val -= scale * (u[i + j*(W+1) + k*(W+1)*H] - 0.0f); //change 0.0f to solid boundary vel 
         if (i < W && labels[idx+1] == Utility::SOLID)
             rhs_val += scale * (u[(i+1) + j*(W+1) + k*(W+1)*H] - 0.0f);
         if (j-1 >= 0 && labels[idx-W] == Utility::SOLID)
@@ -1449,7 +1479,7 @@ struct MatrixFiller3D {
                     }
                     diagVal += scale;
                 }
-                else if (labels[nidx] != Utility::SOLID) {
+                else if (labels[nidx] == Utility::AIR) {
                     diagVal += scale;
                 }
             }
@@ -1732,17 +1762,18 @@ int FluidSolver3D::pressureSolve() {
     );
 
     // Решение системы
-    // Анализ
+    // Анализ (async func)
     status = cudssExecute(handle, CUDSS_PHASE_ANALYSIS,
                           solverConfig, solverData, A, x, b);
-
-    // Факторизация
+    cudaStreamSynchronize(stream);
+    // Факторизация (async func)
     status = cudssExecute(handle, CUDSS_PHASE_FACTORIZATION,
                           solverConfig, solverData, A, x, b);
-
-    // Решение
+    cudaStreamSynchronize(stream);
+    // Решение (async func)
     status = cudssExecute(handle, CUDSS_PHASE_SOLVE,
                           solverConfig, solverData, A, x, b);
+    cudaStreamSynchronize(stream);
 
     status = cudssMatrixDestroy(A);
     status = cudssMatrixDestroy(b);
@@ -1750,7 +1781,7 @@ int FluidSolver3D::pressureSolve() {
     cudssDataDestroy(handle, solverData);
     cudssConfigDestroy(solverConfig);
     cudssDestroy(handle);
-    cudaStreamSynchronize(stream);
+    
 
 //    std::cout << "----solution local---" << std::endl;
 //    thrust::host_vector<float> sol_h = solution;
@@ -1845,34 +1876,52 @@ struct UFunctor {
         int jU = rem / (W + 1);
         int iU = rem % (W + 1);
 
-        // Коррекцию u делаем только для внутренних граней: iU от 1 до W-1
-        if (iU > 0 && iU < W) {
-            // Соответствующие “левые” и “правые” ячейки:
-            // leftCell  = (iU-1, jU, kU)
-            // rightCell = (iU,   jU, kU)
-            int leftIdx  = cellIdx(iU - 1, jU, kU, W, H);
-            int rightIdx = cellIdx(iU    , jU, kU, W, H);
-
-            bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
-            bool rightFluid = (labels[rightIdx] == Utility::FLUID);
-            bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
-            bool rightSolid = (labels[rightIdx] == Utility::SOLID);
-
-            if (leftFluid || rightFluid) {
-                // Если хотя бы один сосед FLUID, но нет SOLID — корректируем
-                if (leftSolid || rightSolid) {
-                    // Грань у стены — обнуляем скорость
-                    u[idx] = 0.0f;
-                } else {
-                    // Коррекция по градиенту: u ← u − scale * (p[right] − p[left])
-                    float dp = p[rightIdx] - p[leftIdx];
-                    u[idx] -= scale * dp;
-                }
-                return;
-            }
+        float usolid = 0.0f; // пока что границы неподвижны
+        float invScale = 1.0f / scale;
+        float p0 = 0.0f;
+        float p1 = 0.0f;
+        int leftIdx  = cellIdx(iU - 1, jU, kU, W, H);
+        int rightIdx = cellIdx(iU, jU, kU, W, H);
+        if(labels[leftIdx] != Utility::SOLID && labels[rightIdx] != Utility::SOLID){
+            p0 = p[leftIdx];
+            p1 = p[rightIdx];
+        } else if(labels[leftIdx] == Utility::SOLID){
+            p0 = p[rightIdx] - invScale * (u[idx] - usolid);
+            p1 = p[rightIdx];
+        } else{
+            p0 = p[leftIdx];
+            p1 = p[leftIdx] + invScale * (u[idx] - usolid);
         }
-        // Во всех остальных случаях (грань между AIR или на границе) помечаем неизвестной
-        u[idx] = 0.0f;
+        u[idx] = u[idx] - scale * (p1 - p0);
+        // Коррекцию u делаем только для внутренних граней: iU от 1 до W-1
+        // if (iU > 0 && iU < W) {
+        //     // Соответствующие “левые” и “правые” ячейки:
+        //     // leftCell  = (iU-1, jU, kU)
+        //     // rightCell = (iU,   jU, kU)
+        //     int leftIdx  = cellIdx(iU - 1, jU, kU, W, H);
+        //     int rightIdx = cellIdx(iU, jU, kU, W, H);
+
+        //     bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
+        //     bool rightFluid = (labels[rightIdx] == Utility::FLUID);
+        //     bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
+        //     bool rightSolid = (labels[rightIdx] == Utility::SOLID);
+
+        //     if (leftFluid || rightFluid) {
+        //         // Если хотя бы один сосед FLUID, но нет SOLID — корректируем
+        //         if (leftSolid || rightSolid) {
+        //             // Грань у стены — обнуляем скорость
+        //             u[idx] = 0.0f;
+        //         } else {
+        //             // Коррекция по градиенту: u ← u − scale * (p[right] − p[left])
+        //             float dp = p[rightIdx] - p[leftIdx];
+        //             u[idx] -= scale * dp;
+        //         }
+        //         return;
+        //     }
+        //     return; // внутренняя + слева и справа AIR -> без изменений
+        // }
+        // // Во всех остальных случаях (грань между AIR или на границе) помечаем неизвестной
+        // u[idx] = 0.0f;
     }
 };
 
@@ -1906,30 +1955,49 @@ struct VFunctor {
         int rem = idx % sliceSize;
         int jV = rem / W;
         int iV = rem % W;
-
-        // Коррекция только для внутренних граней: jV от 1 до H-1
-        if (jV > 0 && jV < H) {
-            // leftCell  = (iV, jV-1, kV)
-            // rightCell = (iV, jV,   kV)
-            int leftIdx  = cellIdx(iV, jV - 1, kV, W, H);
-            int rightIdx = cellIdx(iV, jV    , kV, W, H);
-
-            bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
-            bool rightFluid = (labels[rightIdx] == Utility::FLUID);
-            bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
-            bool rightSolid = (labels[rightIdx] == Utility::SOLID);
-
-            if (leftFluid || rightFluid) {
-                if (leftSolid || rightSolid) {
-                    v[idx] = 0.0f;
-                } else {
-                    float dp = p[rightIdx] - p[leftIdx];
-                    v[idx] -= scale * dp;
-                }
-                return;
-            }
+        
+        float vsolid = 0.0f; // пока что границы неподвижны
+        float invScale = 1.0f / scale;
+        float p0 = 0.0f;
+        float p1 = 0.0f;
+        int leftIdx  = cellIdx(iV, jV - 1, kV, W, H);
+        int rightIdx = cellIdx(iV, jV, kV, W, H);
+        if(labels[leftIdx] != Utility::SOLID && labels[rightIdx] != Utility::SOLID){
+            p0 = p[leftIdx];
+            p1 = p[rightIdx];
+        } else if(labels[leftIdx] == Utility::SOLID){
+            p0 = p[rightIdx] - invScale * (v[idx] - vsolid);
+            p1 = p[rightIdx];
+        } else{
+            p0 = p[leftIdx];
+            p1 = p[leftIdx] + invScale * (v[idx] - vsolid);
         }
-        v[idx] = 0.0f;
+        v[idx] = v[idx] - scale * (p1 - p0);
+
+        // // Коррекция только для внутренних граней: jV от 1 до H-1
+        // if (jV > 0 && jV < H) {
+        //     // leftCell  = (iV, jV-1, kV)
+        //     // rightCell = (iV, jV,   kV)
+        //     int leftIdx  = cellIdx(iV, jV - 1, kV, W, H);
+        //     int rightIdx = cellIdx(iV, jV, kV, W, H);
+
+        //     bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
+        //     bool rightFluid = (labels[rightIdx] == Utility::FLUID);
+        //     bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
+        //     bool rightSolid = (labels[rightIdx] == Utility::SOLID);
+
+        //     if (leftFluid || rightFluid) {
+        //         if (leftSolid || rightSolid) {
+        //             v[idx] = 0.0f;
+        //         } else {
+        //             float dp = p[rightIdx] - p[leftIdx];
+        //             v[idx] -= scale * dp;
+        //         }
+        //         return;
+        //     }
+        //     return;
+        // }
+        // v[idx] = 0.0f;
     }
 };
 
@@ -1964,29 +2032,48 @@ struct WFunctor {
         int jW = rem / W;
         int iW = rem % W;
 
-        // Коррекция только для внутренних граней: kW от 1 до D-1
-        if (kW > 0 && kW < D) {
-            // leftCell  = (iW, jW, kW-1)
-            // rightCell = (iW, jW, kW)
-            int leftIdx  = cellIdx(iW, jW, kW - 1, W, H);
-            int rightIdx = cellIdx(iW, jW, kW    , W, H);
-
-            bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
-            bool rightFluid = (labels[rightIdx] == Utility::FLUID);
-            bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
-            bool rightSolid = (labels[rightIdx] == Utility::SOLID);
-
-            if (leftFluid || rightFluid) {
-                if (leftSolid || rightSolid) {
-                    w[idx] = 0.0f;
-                } else {
-                    float dp = p[rightIdx] - p[leftIdx];
-                    w[idx] -= scale * dp;
-                }
-                return;
-            }
+        float wsolid = 0.0f; // пока что границы неподвижны
+        float invScale = 1.0f / scale;
+        float p0 = 0.0f;
+        float p1 = 0.0f;
+        int leftIdx  = cellIdx(iW, jW, kW - 1, W, H);
+        int rightIdx = cellIdx(iW, jW, kW, W, H);
+        if(labels[leftIdx] != Utility::SOLID && labels[rightIdx] != Utility::SOLID){
+            p0 = p[leftIdx];
+            p1 = p[rightIdx];
+        } else if(labels[leftIdx] == Utility::SOLID){
+            p0 = p[rightIdx] - invScale * (w[idx] - wsolid);
+            p1 = p[rightIdx];
+        } else{
+            p0 = p[leftIdx];
+            p1 = p[leftIdx] + invScale * (w[idx] - wsolid);
         }
-        w[idx] = 0.0f;
+        w[idx] = w[idx] - scale * (p1 - p0);
+
+        // // Коррекция только для внутренних граней: kW от 1 до D-1
+        // if (kW > 0 && kW < D) {
+        //     // leftCell  = (iW, jW, kW-1)
+        //     // rightCell = (iW, jW, kW)
+        //     int leftIdx  = cellIdx(iW, jW, kW - 1, W, H);
+        //     int rightIdx = cellIdx(iW, jW, kW, W, H);
+
+        //     bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
+        //     bool rightFluid = (labels[rightIdx] == Utility::FLUID);
+        //     bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
+        //     bool rightSolid = (labels[rightIdx] == Utility::SOLID);
+
+        //     if (leftFluid || rightFluid) {
+        //         if (leftSolid || rightSolid) {
+        //             w[idx] = 0.0f;
+        //         } else {
+        //             float dp = p[rightIdx] - p[leftIdx];
+        //             w[idx] -= scale * dp;
+        //         }
+        //         return;
+        //     }
+        //     return;
+        // }
+        // w[idx] = 0.0f;
     }
 };
 
