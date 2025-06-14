@@ -15,9 +15,9 @@ int main(){
 
     FluidSolver3D solver(5, 5, 5, dx, dt);
     //solver.PIC_WEIGHT = (6.0f * dt)/(dx*dx);
-    solver.PIC_WEIGHT = 0.5f;
+    solver.PIC_WEIGHT = 0.07f;
     std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
-    solver.init("InputData/labels_simple3d.txt");
+    solver.init("InputData/labels_gaussian.txt");
     solver.run(1000);
 
 //    FluidSolver2D solver2d(5, 5, dx, dt);

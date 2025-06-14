@@ -2209,7 +2209,7 @@ __host__ void FluidSolver3D::frameStep(){
     //grid velocities to particles
     gridToParticles(PIC_WEIGHT);
 
-    advectParticles(ADVECT_MAX);
+    advectParticles(0.5);
 
 }
 
@@ -2223,10 +2223,10 @@ __host__ void FluidSolver3D::run(int max_steps) {
     cudaEventRecord(start, 0);
     for(int i = 0; i < max_steps; ++i){
         frameStep();
-        if(i%10 == 0){
+        if(i%1 == 0){
             h_particles = d_particles;
             Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i) + ".ply");
-            std::cout << "frame = " << i/10 << "; numParticles = " << h_particles.size()<<std::endl;
+            std::cout << "frame = " << i << "; numParticles = " << h_particles.size()<<std::endl;
         }
 
     }
