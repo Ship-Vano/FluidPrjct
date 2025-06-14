@@ -93,6 +93,13 @@ private:
     int blocksForParticles;
     int threadsPerBlock = 256;
 
+    //cudss vars
+    cudaStream_t stream;
+    cudssHandle_t handle;
+    cudssConfig_t solverConfig;
+    cudssData_t solverData;
+
+
     // list of all particles in the simulation
     thrust::host_vector<Utility::Particle3D> h_particles;
     thrust::device_vector<Utility::Particle3D> d_particles;
@@ -123,6 +130,7 @@ private:
 
 public:
     float PIC_WEIGHT = 0.5f; // changed in the main
+    int iterPerFrame = 10; // iterations to generate one frame (file out each iterPerFrame steps)
     /*
 	Creates a new 2D fluid solver.
 	Args:

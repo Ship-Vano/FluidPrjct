@@ -13,9 +13,32 @@ FluidSolver3D::FluidSolver3D(int width, int height, int depth, float dx_, float 
     std::cout << "dx=" << dx<<"\n";
     h_particles = thrust::host_vector<Utility::Particle3D>();
     d_particles = thrust::device_vector<Utility::Particle3D>();
+
+    // Инициализация CUDA stream
+    stream = nullptr;
+    cudaStreamCreate(&stream);
+
+    // Создание cuDSS handle
+    handle = nullptr;
+    cudssStatus_t status = cudssCreate(&handle);
+    if (status != CUDSS_STATUS_SUCCESS) {
+        throw std::runtime_error("cuDSS init failed: " + std::to_string(status));
+    }
+
+    // Привязка stream к handle
+    cudssSetStream(handle, stream);
+
+    // Создание конфигурации и данных решателя
+    cudssConfigCreate(&solverConfig);
+    cudssDataCreate(handle, &solverData);
 }
 
 FluidSolver3D::~FluidSolver3D(){
+    // Уничтожение объектов cuDSS
+    if (solverData) cudssDataDestroy(handle, solverData);
+    if (solverConfig) cudssConfigDestroy(solverConfig);
+    if (handle) cudssDestroy(handle);
+    if (stream) cudaStreamDestroy(stream);
 }
 
 
@@ -1687,22 +1710,22 @@ int FluidSolver3D::pressureSolve() {
         return -2;
     }
 
-    cudaStream_t stream = NULL;
-    cudaStreamCreate(&stream);
-    cudssHandle_t handle;
-    cudssStatus_t status = cudssCreate(&handle);
-    cudssSetStream(handle, stream);
+    //cudaStream_t stream = NULL;
+    //cudaStreamCreate(&stream);
+    //cudssHandle_t handle;
+    //cudssStatus_t status = cudssCreate(&handle);
+    //cudssSetStream(handle, stream);
 
-    cudssConfig_t solverConfig;
-    cudssData_t solverData;
-    cudssConfigCreate(&solverConfig);
-    cudssDataCreate(handle, &solverData);
+    //cudssConfig_t solverConfig;
+    //cudssData_t solverData;
+    //cudssConfigCreate(&solverConfig);
+    //cudssDataCreate(handle, &solverData);
 
-    if (status != CUDSS_STATUS_SUCCESS) {
-        std::cerr << "cuDSS init failed: " << status << std::endl;
-        return -3;
-    }
-
+//    if (status != CUDSS_STATUS_SUCCESS) {
+//        std::cerr << "cuDSS init failed: " << status << std::endl;
+//        return -3;
+//    }
+    cudssStatus_t status;
     cudssMatrix_t A;
     cudssMatrixType_t mtype = CUDSS_MTYPE_SPD;// Symmetric Positive Definite
     cudssMatrixViewType_t mview = CUDSS_MVIEW_UPPER;// Upper triangular stored
@@ -1778,9 +1801,9 @@ int FluidSolver3D::pressureSolve() {
     status = cudssMatrixDestroy(A);
     status = cudssMatrixDestroy(b);
     status = cudssMatrixDestroy(x);
-    cudssDataDestroy(handle, solverData);
-    cudssConfigDestroy(solverConfig);
-    cudssDestroy(handle);
+    //cudssDataDestroy(handle, solverData);
+    //cudssConfigDestroy(solverConfig);
+    //cudssDestroy(handle);
     
 
 //    std::cout << "----solution local---" << std::endl;
@@ -2221,12 +2244,12 @@ __host__ void FluidSolver3D::run(int max_steps) {
     cudaEventCreate(&stop);
     // Start record
     cudaEventRecord(start, 0);
-    for(int i = 0; i < max_steps; ++i){
+    for(int i = 0; i <= max_steps*iterPerFrame; ++i){
         frameStep();
-        if(i%1 == 0){
+        if(i%iterPerFrame == 0){
             h_particles = d_particles;
-            Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i) + ".ply");
-            std::cout << "frame = " << i << "; numParticles = " << h_particles.size()<<std::endl;
+            Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i/iterPerFrame ) + ".ply");
+            std::cout << "frame = " << i / iterPerFrame   << "; numParticles = " << h_particles.size()<<std::endl;
         }
 
     }
