@@ -10,16 +10,18 @@
 int main(){
     //cuDSStest();
     //out();
-    float dt = 0.008f;
+    float dt = 0.02f;
     float dx = 0.1f;
 
     FluidSolver3D solver(5, 5, 5, dx, dt);
     //solver.PIC_WEIGHT = (6.0f * dt)/(dx*dx);
     solver.PIC_WEIGHT = 0.01f;
-    solver.iterPerFrame = 2;
+    solver.iterPerFrame = 1;
+    solver.outputFormat = OFF;
     std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
     solver.init("InputData/labels_gaussian.txt");
-    solver.run(200);
+    solver.run(1000);
+
 
 //    FluidSolver2D solver2d(5, 5, dx, dt);
 //    solver2d.PIC_WEIGHT = (6.0f * dt)/(dx*dx);

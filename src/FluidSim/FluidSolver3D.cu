@@ -1061,7 +1061,7 @@ bool projectParticleDevice3D(Utility::Particle3D &particle,
                              int W, int H, int D, float dx)
 {
     // 26 соседей
-    const int off[26][3] = {
+    const int off[34][3] = {
             { 1, 0, 0}, {-1, 0, 0},
             { 0, 1, 0}, { 0,-1, 0},
             { 0, 0, 1}, { 0, 0,-1},
@@ -1074,7 +1074,11 @@ bool projectParticleDevice3D(Utility::Particle3D &particle,
             {1, 1, 1}, {-1, 1, 1},
             {1, -1, 1}, {1, 1, -1},
             {-1, -1, 1}, {-1, 1, -1},
-            {1, -1, -1}, {-1, -1, -1}
+            {1, -1, -1}, {-1, -1, -1},
+            {-2, -1, 0},{0,-1,-2},
+            {-2,-2,0}, {0,-2,-2},
+            {-2,-2,-2},{-2,0,-2},
+            {2,-1,0},   {0,-1,2}
     };
 
     // Текущая клетка
@@ -1083,14 +1087,14 @@ bool projectParticleDevice3D(Utility::Particle3D &particle,
     int cz = int(floorf(particle.pos.z / dx));
 
     float3 bestPos = particle.pos;
-    float  bestD   = fmaxf(W, H) * dx; //1e10f;
+    float  bestD   = 1e10f;
     bool   found   = false;
     int foundNeigInd = 0;
     //ищем наименьшее расстояние до твёрдой ячейки, не нашли, тогда до ближайшей воздушной
     // Сначала пытаемся найти соседнюю клетку со статусом FLUID, потом AIR
-    for (int pass = 0; pass < 2; ++pass) {
+    for (int pass = 0; pass < 1; ++pass) {
         int wanted = (pass == 0 ? Utility::FLUID : Utility::AIR);
-        for (int n = 0; n < 26; ++n) {
+        for (int n = 0; n < 34; ++n) {
             int nx = cx + off[n][0];
             int ny = cy + off[n][1];
             int nz = cz + off[n][2];
@@ -1117,16 +1121,17 @@ bool projectParticleDevice3D(Utility::Particle3D &particle,
     }
     if (!found) return false;
 
-    // Переносим частицу на центр найденной соседней клетки
-    particle.pos = bestPos;
-
-    // во избежание накопления частиц в центрах ячеек:
-    thrust::default_random_engine randEng;
-    thrust::uniform_real_distribution<float> uniDist(-1.0f, 1.0f);
-    randEng.discard(foundNeigInd);
-    particle.pos.x += uniDist(randEng) * 0.25f * dx;
-    particle.pos.y += uniDist(randEng) * 0.25f * dx;
-    particle.pos.z += uniDist(randEng) * 0.25f * dx;
+    particle.pos = particle.pos + make_float3(static_cast<float>(off[foundNeigInd][0]),static_cast<float>(off[foundNeigInd][1]),static_cast<float>(off[foundNeigInd][2]))* 0.5f * dx;
+//    // Переносим частицу на центр найденной соседней клетки
+//    particle.pos = bestPos;
+//
+//    // во избежание накопления частиц в центрах ячеек:
+//    thrust::default_random_engine randEng;
+//    thrust::uniform_real_distribution<float> uniDist(-1.0f, 1.0f);
+//    randEng.discard(foundNeigInd);
+//    particle.pos.x += uniDist(randEng) * 0.05f * dx;
+//    particle.pos.y += uniDist(randEng) * 0.05f * dx;
+//    particle.pos.z += uniDist(randEng) * 0.05f * dx;
     return true;
 }
 
@@ -1155,13 +1160,13 @@ struct AdvectParticlesFunctor {
         bool  finished = false;
         int   iter = 0;
 
-        while (!finished && iter++ < 100) {
+        while (!finished && iter++ < 1000) {
             // 1) Интерполируем скорость из MAC-поля
             float3 vel = interpVelDevice3D(u, v, w, W, H, D, dx, particle.pos);
                 
             // 2) Рассчитываем шаг dT по CFL-критерию
             //" It has been suggested[FF01] that an appropriate strategy is to limit dT so that the furthest a particle trajectory is traced is five grid cell widths:
-            float speed = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z) +1e-37f/*+ sqrtf(5.0f * dx * 9.8f)*/; 
+            float speed = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z) +1e-37f + sqrtf(5.0f * dx * 9.8f);
             float dT = (C * dx) / speed; //шаг по времени находим из критерия Куранта
             if (subT + dT >= dt) {
                 dT = dt - subT;
@@ -1171,9 +1176,20 @@ struct AdvectParticlesFunctor {
             }
 
             // 3) Явный Эйлер (возможно, стоит поменять на RK3, как это советует R. Bridson...)
-            particle.pos.x += vel.x * dT;
-            particle.pos.y += vel.y * dT;
-            particle.pos.z += vel.z * dT;
+//            particle.pos.x += vel.x * dT;
+//            particle.pos.y += vel.y * dT;
+//            particle.pos.z += vel.z * dT;
+
+            //3) RK2
+//            float3 midPos = particle.pos + vel * dT * 0.5f;
+//            float3 midVel = interpVelDevice3D(u, v, w, W, H, D, dx, midPos);
+//            particle.pos = particle.pos + midVel * dT;
+            //3)RK3
+            float3 k1 = vel;
+            float3 k2 = interpVelDevice3D(u, v, w, W, H, D, dx, particle.pos + k1 * 0.5f*dT);
+            float3 k3 = interpVelDevice3D(u, v, w, W, H, D, dx, particle.pos + k2 * 0.75f*dT);
+            particle.pos = particle.pos + (2.0f / 9.0f)*dT * k1 + (3.0f / 9.0f)*dT * k2 + (4.0f / 9.0f)*dT * k3;
+
             subT += dT;
 
             particle.pos.x = fmaxf(particle.pos.x, 0.0f);
@@ -1183,14 +1199,7 @@ struct AdvectParticlesFunctor {
             particle.pos.z = fmaxf(particle.pos.z, 0.0f);
             particle.pos.z = fminf(particle.pos.z, (D-1)*dx);
 
-            // 4) Проверяем выход за нижние границы и NaN
-            if (particle.pos.x < 0.0f || particle.pos.y < 0.0f || particle.pos.z < 0.0f ||
-                isnan(particle.pos.x)  || isnan(particle.pos.y)  || isnan(particle.pos.z)) {
-                    //возможно, стоит придумать, как обрабатывать такой случай
-                break;
-            }
-
-            // 5) Если частица попала в SOLID-клетку, пытаемся спроецировать её в соседнюю
+            // 4) Если частица попала в SOLID-клетку, пытаемся спроецировать её в соседнюю
             int cx = int(floorf(particle.pos.x / dx));
             int cy = int(floorf(particle.pos.y / dx));
             int cz = int(floorf(particle.pos.z / dx));
@@ -1200,6 +1209,13 @@ struct AdvectParticlesFunctor {
                     if (!projectParticleDevice3D(particle, labels, W, H, D, dx)) //насильно отбрасываем в FLUID (приоритетнее) или в AIR ячейку
                         break;
                 }
+            }
+
+            // 5) Проверяем выход за нижние границы и NaN
+            if (particle.pos.x < 0.0f || particle.pos.y < 0.0f || particle.pos.z < 0.0f ||
+                isnan(particle.pos.x)  || isnan(particle.pos.y)  || isnan(particle.pos.z)) {
+                //возможно, стоит придумать, как обрабатывать такой случай
+                break;
             }
         }
 
@@ -2232,7 +2248,7 @@ __host__ void FluidSolver3D::frameStep(){
     //grid velocities to particles
     gridToParticles(PIC_WEIGHT);
 
-    advectParticles(0.5);
+    advectParticles(0.1);
 
 }
 
@@ -2248,7 +2264,16 @@ __host__ void FluidSolver3D::run(int max_steps) {
         frameStep();
         if(i%iterPerFrame == 0){
             h_particles = d_particles;
-            Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i/iterPerFrame ) + ".ply");
+            switch(outputFormat){
+                case PLY:
+                    Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i/iterPerFrame ) + ".ply");
+                    break;
+                case OFF:
+                    Utility::save3dParticlesToOFF(h_particles, "InputData/particles_" + std::to_string(i/iterPerFrame ) + ".off");
+                    break;
+                default:
+                    Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i/iterPerFrame ) + ".ply");
+            }
             std::cout << "frame = " << i / iterPerFrame   << "; numParticles = " << h_particles.size()<<std::endl;
         }
 

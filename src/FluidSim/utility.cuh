@@ -53,12 +53,19 @@ __device__ float2 operator*(const float2& a, float b);
 
 
 const int VEL_UNKNOWN = INT_MIN;
+enum FileOutputFormat{
+    PLY,
+    OFF
+};
 
 namespace Utility {
 
     const int SOLID = 0;
     const int FLUID = 1;
     const int AIR = 2;
+
+
+
 
     struct Particle2D {
         float2 pos;
@@ -81,6 +88,8 @@ namespace Utility {
     void saveParticlesToPLY(const std::vector<Particle2D>& particles,
                             const std::string& filename);
     void save3dParticlesToPLY(const thrust::host_vector<Particle3D>& particles,
+                              const std::string& filename);
+    void save3dParticlesToOFF(const thrust::host_vector<Particle3D>& particles,
                               const std::string& filename);
 
     __device__ int getGridCellIndex_device(float2 pos, float dx, int gridWidth);

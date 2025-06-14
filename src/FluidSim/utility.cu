@@ -87,7 +87,10 @@ namespace Utility {
     void save3dParticlesToPLY(const thrust::host_vector<Particle3D>& particles,
                             const std::string& filename) {
         std::ofstream file(filename);
-
+        if (!file.is_open()) {
+            std::cerr << "Error opening file: " << filename << std::endl;
+            return;
+        }
         file << "ply\n"
              << "format ascii 1.0\n"
              << "element vertex " << particles.size() << "\n"
@@ -97,6 +100,24 @@ namespace Utility {
              << "end_header\n";
 
         for (const auto p: particles) {
+            file << p.pos.x << " " << p.pos.y << " " << p.pos.z << "\n";
+        }
+    }
+
+    void save3dParticlesToOFF(const thrust::host_vector<Particle3D>& particles,
+                              const std::string& filename) {
+        std::ofstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Error opening file: " << filename << std::endl;
+            return;
+        }
+
+        // Заголовок формата OFF
+        file << "OFF\n";
+        file << particles.size() << " 0 0\n"; // Вершины, грани (0), рёбра (0)
+
+        // Запись координат частиц
+        for (const auto& p : particles) {
             file << p.pos.x << " " << p.pos.y << " " << p.pos.z << "\n";
         }
     }

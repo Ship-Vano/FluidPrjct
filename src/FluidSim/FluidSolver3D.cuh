@@ -131,6 +131,7 @@ private:
 public:
     float PIC_WEIGHT = 0.5f; // changed in the main
     int iterPerFrame = 10; // iterations to generate one frame (file out each iterPerFrame steps)
+    FileOutputFormat outputFormat = PLY;
     /*
 	Creates a new 2D fluid solver.
 	Args:
