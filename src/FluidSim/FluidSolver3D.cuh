@@ -104,6 +104,9 @@ private:
     thrust::host_vector<Utility::Particle3D> h_particles;
     thrust::device_vector<Utility::Particle3D> d_particles;
 
+    //RIGID BODY (DUCK)
+    Utility::RigidBody body;
+
     // FUNCTIONS
     // solver steps
     __host__ void seedParticles(int particlesPerCell);

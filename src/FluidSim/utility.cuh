@@ -39,6 +39,8 @@ __device__ float3 operator*(float b, const float3& a);
 
 __device__ float operator*(const float3& a, const float3& b);
 
+__device__ float3 operator/(const float3&a, const float&b);
+
 __device__ double3 operator+(const double3& a, const double3& b);
 
 __device__ double3 operator-(const double3& a, const double3& b);
@@ -53,6 +55,7 @@ __device__ float2 operator*(const float2& a, float b);
 
 
 const int VEL_UNKNOWN = INT_MIN;
+
 enum FileOutputFormat{
     PLY,
     OFF
@@ -63,9 +66,7 @@ namespace Utility {
     const int SOLID = 0;
     const int FLUID = 1;
     const int AIR = 2;
-
-
-
+    const int BODY = 3;
 
     struct Particle2D {
         float2 pos;
@@ -153,7 +154,74 @@ namespace Utility {
         }
     };
 
+    struct float3x3 {
+        float3 col0, col1, col2;
 
+        __device__ float3x3()
+                : col0(make_float3(0.0f, 0.0f, 0.0f)), col1(make_float3(0.0f, 0.0f, 0.0f)), col2(make_float3(0.0f, 0.0f, 0.0f)) {}
+
+        __device__ float3x3(float3 c0, float3 c1, float3 c2)
+                : col0(c0), col1(c1), col2(c2) {}
+
+        // Умножение матрицы на вектор
+        __device__ float3 operator*(const float3& v) const {
+            return make_float3(
+                    col0 * v,
+                    col1 *  v,
+                    col2 * v
+            );
+        }
+
+        // Создание диагональной матрицы
+        __device__ static float3x3 diag(float d) {
+            return float3x3(
+                    make_float3(d, 0, 0),
+                    make_float3(0, d, 0),
+                    make_float3(0, 0, d)
+            );
+        }
+    };
+
+    struct RigidBody{
+        float3 pos;
+        float3 vel;
+        float3 force;
+        float mass;
+//        float3x3 inertia;
+//        float3x3 inv_inertia;
+
+        // SDF данные
+        float* sdf_data;          // Сырой указатель на данные
+        int sdf_dims[3];          // [width, height, depth]
+        float3 sdf_origin;
+        float sdf_cell_size;
+
+        // Метод для загрузки SDF
+        void loadSDF(const std::string& filename) {
+            std::ifstream file(filename, std::ios::binary);
+            file.read(reinterpret_cast<char*>(sdf_dims), 3 * sizeof(int));
+            file.read(reinterpret_cast<char*>(&sdf_origin), 3 * sizeof(float));
+            file.read(reinterpret_cast<char*>(&sdf_cell_size), sizeof(float));
+
+            size_t size = sdf_dims[0] * sdf_dims[1] * sdf_dims[2];
+            thrust::host_vector<float> h_sdf(size);
+            file.read(reinterpret_cast<char*>(h_sdf.data()), size * sizeof(float));
+
+            // Выделяем память на устройстве
+            cudaMalloc(&sdf_data, size * sizeof(float));
+            cudaMemcpy(sdf_data, h_sdf.data(), size * sizeof(float), cudaMemcpyHostToDevice);
+        }
+
+        // Освобождение памяти
+        void freeSDF() {
+            if (sdf_data) {
+                cudaFree(sdf_data);
+                sdf_data = nullptr;
+            }
+        }
+    };
+
+    __device__ bool contains(const RigidBody& body, float3 world_pos);
 
 
 

@@ -20,6 +20,10 @@ __device__ float operator*(const float3& a, const float3& b){
     return a.x*b.x + a.y*b.y + a.z*b.z;
 }
 
+__device__ float3 operator/(const float3&a, const float&b){
+    return a * (1.0f/b);
+}
+
 __device__ double3 operator+(const double3& a, const double3& b) {
     return make_double3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
@@ -156,5 +160,17 @@ namespace Utility {
         return {ind % (gridWidth), ind / (gridWidth)}; // i, j для v-компоненты
     }
 
+    __device__ bool contains(const RigidBody& body, float3 world_pos) {
+        float3 local_pos = (world_pos - body.sdf_origin) / body.sdf_cell_size;
+        int i = static_cast<int>(local_pos.x);
+        int j = static_cast<int>(local_pos.y);
+        int k = static_cast<int>(local_pos.z);
 
+        if (i < 0 || i >= body.sdf_dims[0] ||
+            j < 0 || j >= body.sdf_dims[1] ||
+            k < 0 || k >= body.sdf_dims[2]) return false;
+
+        int idx = i + j * body.sdf_dims[0] + k * body.sdf_dims[0] * body.sdf_dims[1];
+        return body.sdf_data[idx] <= 0.0f;
+    }
 }

@@ -12,12 +12,13 @@ int main(){
     //out();
     float dt = 0.02f;
     float dx = 0.1f;
-
+    //float dx = 1.0f/75.0f;
+    //dt = dx*0.1;
     FluidSolver3D solver(5, 5, 5, dx, dt);
     //solver.PIC_WEIGHT = (6.0f * dt)/(dx*dx);
     solver.PIC_WEIGHT = 0.01f;
     solver.iterPerFrame = 1;
-    solver.outputFormat = OFF;
+    solver.outputFormat = PLY;
     std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
     solver.init("InputData/labels_gaussian.txt");
     solver.run(1000);
