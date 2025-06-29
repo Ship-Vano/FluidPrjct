@@ -121,6 +121,7 @@ private:
     void advectParticles(float C);
     void cleanUpParticles(float delta);
     void extrapolateGridFluidData(std::vector<float>& grid, int x, int y, int depth);
+
     // helpers
     bool isFluid(int i, int j, int k);
     bool isCellValid(int x, int y, int z);
@@ -130,6 +131,9 @@ private:
     bool projectParticle(Utility::Particle3D* particle, float max_h);
     void RK3(Utility::Particle3D *particle, float3 initVel, float dt, std::vector<float>& uGrid, std::vector<float>& vGrid, std::vector<float>& wGrid);
     std::vector<int> checkNeighbors(std::vector<int> grid, int3 dim, int3 index, int neighbors[][3], int numNeighbors, int value);
+
+    //rigid body funcs
+    void updateBody(float dt);
 
 public:
     float PIC_WEIGHT = 0.5f; // changed in the main

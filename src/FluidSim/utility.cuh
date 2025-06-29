@@ -29,29 +29,29 @@
 #include <string>
 #include <iomanip>
 
-__device__ float3 operator+(const float3& a, const float3& b);
+__host__ __device__ float3 operator+(const float3& a, const float3& b);
 
-__device__ float3 operator-(const float3& a, const float3& b);
+__host__ __device__ float3 operator-(const float3& a, const float3& b);
 
-__device__ float3 operator*(const float3& a, float b);
+__host__ __device__ float3 operator*(const float3& a, float b);
 
-__device__ float3 operator*(float b, const float3& a);
+__host__ __device__ float3 operator*(float b, const float3& a);
 
-__device__ float operator*(const float3& a, const float3& b);
+__host__ __device__ float operator*(const float3& a, const float3& b);
 
-__device__ float3 operator/(const float3&a, const float&b);
+__host__ __device__ float3 operator/(const float3&a, const float&b);
 
-__device__ double3 operator+(const double3& a, const double3& b);
+__host__ __device__ double3 operator+(const double3& a, const double3& b);
 
-__device__ double3 operator-(const double3& a, const double3& b);
+__host__ __device__ double3 operator-(const double3& a, const double3& b);
 
-__device__ double3 operator*(const double3& a, float b);
+__host__ __device__ double3 operator*(const double3& a, float b);
 
-__device__ float2 operator+(const float2& a, const float2& b);
+__host__ __device__ float2 operator+(const float2& a, const float2& b);
 
-__device__ float2 operator-(const float2& a, const float2& b);
+__host__ __device__ float2 operator-(const float2& a, const float2& b);
 
-__device__ float2 operator*(const float2& a, float b);
+__host__ __device__ float2 operator*(const float2& a, float b);
 
 
 const int VEL_UNKNOWN = INT_MIN;
@@ -194,24 +194,115 @@ namespace Utility {
 
         // SDF данные
         float* sdf_data;          // Сырой указатель на данные
-        int sdf_dims[3];          // [width, height, depth]
-        float3 sdf_origin;
-        float sdf_cell_size;
+        int sdf_dims[3];          // Размеры сетки SDF [width, height, depth]
+        float3 sdf_origin;      // Минимальный угол сетки SDF (мировые координаты)
+        float sdf_cell_size; // Размер ячейки SDF
+
+        // Размеры тела в мировых координатах
+        float3 size;
+
+        thrust::host_vector<float3> surface_points;
+        thrust::host_vector<float> sdf_data_host;  // Хост-копия данных SDF
 
         // Метод для загрузки SDF
-        void loadSDF(const std::string& filename) {
-            std::ifstream file(filename, std::ios::binary);
-            file.read(reinterpret_cast<char*>(sdf_dims), 3 * sizeof(int));
-            file.read(reinterpret_cast<char*>(&sdf_origin), 3 * sizeof(float));
-            file.read(reinterpret_cast<char*>(&sdf_cell_size), sizeof(float));
+        void loadSDF(const std::string& filename, const float3& initial_position) {
+            // Освобождаем предыдущие данные
+            if (sdf_data) {
+                cudaFree(sdf_data);
+                sdf_data = nullptr;
+            }
 
-            size_t size = sdf_dims[0] * sdf_dims[1] * sdf_dims[2];
-            thrust::host_vector<float> h_sdf(size);
-            file.read(reinterpret_cast<char*>(h_sdf.data()), size * sizeof(float));
+            // Открываем файл в текстовом режиме
+            std::ifstream file(filename);
+            if (!file.is_open()) {
+                throw std::runtime_error("Cannot open SDF file: " + filename);
+            }
 
-            // Выделяем память на устройстве
-            cudaMalloc(&sdf_data, size * sizeof(float));
-            cudaMemcpy(sdf_data, h_sdf.data(), size * sizeof(float), cudaMemcpyHostToDevice);
+            // 1. Читаем размеры сетки
+            std::string line;
+            std::getline(file, line);
+            std::istringstream dims_line(line);
+            dims_line >> sdf_dims[0] >> sdf_dims[1] >> sdf_dims[2];
+            std::cout << "SDF dimensions: "
+                      << sdf_dims[0] << "x"
+                      << sdf_dims[1] << "x"
+                      << sdf_dims[2] << std::endl;
+
+            // 2. Читаем начало координат SDF
+            std::getline(file, line);
+            std::istringstream origin_line(line);
+            origin_line >> sdf_origin.x >> sdf_origin.y >> sdf_origin.z;
+            std::cout << "Original SDF origin: ("
+                      << sdf_origin.x << ", "
+                      << sdf_origin.y << ", "
+                      << sdf_origin.z << ")" << std::endl;
+
+            // 3. Читаем размер ячейки
+            std::getline(file, line);
+            sdf_cell_size = std::stof(line);
+            std::cout << "SDF cell size: " << sdf_cell_size << std::endl;
+
+            // 4. Рассчитываем размеры тела
+            size = make_float3(
+                    sdf_dims[0] * sdf_cell_size,
+                    sdf_dims[1] * sdf_cell_size,
+                    sdf_dims[2] * sdf_cell_size
+            );
+
+            // 5. Устанавливаем положение центра масс
+            pos = initial_position;
+
+            // 6. Корректируем начало SDF под новое положение
+            sdf_origin = pos - size / 2.0f;
+            std::cout << "Adjusted SDF origin: ("
+                      << sdf_origin.x << ", "
+                      << sdf_origin.y << ", "
+                      << sdf_origin.z << ")" << std::endl;
+
+            // 7. Читаем данные SDF
+            size_t data_size = sdf_dims[0] * sdf_dims[1] * sdf_dims[2];
+            std::vector<float> h_sdf;
+            h_sdf.reserve(data_size);
+
+            float value;
+            while (file >> value) {
+                h_sdf.push_back(value);
+            }
+
+            // Проверяем количество считанных значений
+            if (h_sdf.size() != data_size) {
+                std::ostringstream msg;
+                msg << "Incorrect number of SDF values: expected "
+                    << data_size << ", got " << h_sdf.size();
+                throw std::runtime_error(msg.str());
+            }
+
+            // 8. Выводим первые 5 значений для проверки
+            std::cout << "First 5 SDF values: ";
+            for (int i = 0; i < 5 && i < h_sdf.size(); i++) {
+                std::cout << h_sdf[i] << " ";
+            }
+            std::cout << std::endl;
+
+            // 9. Выделяем память на GPU и копируем данные
+            cudaError_t err = cudaMalloc(&sdf_data, data_size * sizeof(float));
+            if (err != cudaSuccess) {
+                throw std::runtime_error("cudaMalloc failed: " +
+                                         std::string(cudaGetErrorString(err)));
+            }
+
+            err = cudaMemcpy(sdf_data, h_sdf.data(),
+                             data_size * sizeof(float),
+                             cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) {
+                cudaFree(sdf_data);
+                sdf_data = nullptr;
+                throw std::runtime_error("cudaMemcpy failed: " +
+                                         std::string(cudaGetErrorString(err)));
+            }
+
+            std::cout << "SDF loaded successfully. Total values: "
+                      << data_size << std::endl;
         }
 
         // Освобождение памяти
@@ -220,6 +311,71 @@ namespace Utility {
                 cudaFree(sdf_data);
                 sdf_data = nullptr;
             }
+        }
+
+        // Функция для копирования SDF данных на хост
+        void copySDFToHost() {
+            size_t data_size = sdf_dims[0] * sdf_dims[1] * sdf_dims[2];
+            sdf_data_host.resize(data_size);
+
+            cudaError_t err = cudaMemcpy(
+                    sdf_data_host.data(),
+                    sdf_data,
+                    data_size * sizeof(float),
+                    cudaMemcpyDeviceToHost
+            );
+
+            if (err != cudaSuccess) {
+                throw std::runtime_error("Failed to copy SDF data to host: " +
+                                         std::string(cudaGetErrorString(err)));
+            }
+        }
+
+        // Генерация точек поверхности с использованием хост-данных
+        void generateSurfacePoints(float density) {
+            surface_points.clear();
+            const float threshold = 0.0f;
+
+            // Убедимся, что данные на хосте актуальны
+            if (sdf_data_host.size() != static_cast<size_t>(sdf_dims[0] * sdf_dims[1] * sdf_dims[2])) {
+                copySDFToHost();
+            }
+
+            for (int k = 0; k < sdf_dims[2]; k++) {
+                for (int j = 0; j < sdf_dims[1]; j++) {
+                    for (int i = 0; i < sdf_dims[0]; i++) {
+                        int idx = i + j*sdf_dims[0] + k*sdf_dims[0]*sdf_dims[1];
+                        if (fabs(sdf_data_host[idx]) < density) {
+                            float3 pos = sdf_origin + make_float3(
+                                    i * sdf_cell_size,
+                                    j * sdf_cell_size,
+                                    k * sdf_cell_size
+                            );
+                            surface_points.push_back(pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Экспорт поверхности в формате OBJ
+        void exportToOBJ(const std::string& filename) const {
+            std::ofstream file(filename);
+            if (!file.is_open()) {
+                throw std::runtime_error("Cannot open OBJ file: " + filename);
+            }
+
+            file << "# Rigid Body Surface\n";
+            file << "# Vertices: " << surface_points.size() << "\n\n";
+
+            // Записываем вершины
+            for (const auto& p : surface_points) {
+                file << "v " << p.x << " " << p.y << " " << p.z << "\n";
+            }
+
+            // Для полноценного меша нужно добавить грани,
+            // но для облака точек этого достаточно
+            file.close();
         }
     };
 

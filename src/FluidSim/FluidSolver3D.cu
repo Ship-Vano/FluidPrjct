@@ -120,6 +120,20 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
     seedParticles(PARTICLES_PER_CELL);
     std::cout <<"Number of particles is" << h_particles.size() << std::endl;
     Utility::save3dParticlesToPLY(h_particles, "InputData/particles_-1.ply");
+
+    // Инициализация тела
+    float3 initial_position = make_float3(1.7f, 1.7f, 1.7f);  // Желаемая начальная позиция
+    body.loadSDF("InputData/ball.sdf", initial_position);
+
+    // Физические свойства
+    body.mass = 10.0f;  // Масса в кг
+    body.vel = make_float3(0.0f, 0.0f, 0.0f);
+    body.force = make_float3(0.0f, 0.0f, 0.0f);
+
+    // Момент инерции (для сферы)
+    float radius = body.size.x / 2.0f;  // Предполагаем сферическое тело
+    body.inertia = 0.4f * body.mass * radius * radius;
+    body.inv_inertia = 1.0f / body.inertia;
 }
 
 struct FluidFlagFunctor {
@@ -255,6 +269,31 @@ struct MarkFluidCellsFunctor {
     }
 };
 
+struct MarkBodyCellsFunctor {
+    Utility::RigidBody device_body;
+    int* labels_ptr;
+    int W, H;
+    float dx;
+
+    __host__ __device__
+    MarkBodyCellsFunctor(Utility::RigidBody body, int* labels, int width, int height, float cell_size)
+            : device_body(body), labels_ptr(labels), W(width), H(height), dx(cell_size) {}
+
+    __device__
+    void operator()(int idx) const {
+        int i = idx % W;
+        int j = (idx / W) % H;
+        int k = idx / (W*H);
+
+        float3 cell_center = make_float3(
+                (i+0.5f)*dx, (j+0.5f)*dx, (k+0.5f)*dx
+        );
+
+        if (contains(device_body, cell_center)) {
+            labels_ptr[idx] = Utility::BODY;
+        }
+    }
+};
 
 __host__ int FluidSolver3D::labelGrid() {
     int totalCells = labels.width() * labels.height() * labels.depth();
@@ -284,6 +323,29 @@ __host__ int FluidSolver3D::labelGrid() {
                 functor
         );
     }
+
+    // 3) Разметка для rigid body
+    Utility::RigidBody device_body = body;
+    device_body.sdf_data = body.sdf_data;
+    int* labels_ptr = labels.device_ptr();
+    const int W = gridWidth, H = gridHeight;
+
+    // Создаем экземпляр функтора
+    MarkBodyCellsFunctor func(
+            device_body,
+            labels_ptr,
+            W,
+            H,
+            dx
+    );
+
+    // Запускаем вычисления
+    thrust::for_each_n(
+            thrust::device,
+            thrust::make_counting_iterator(0),
+            W*H*gridDepth,
+            func
+    );
 
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
@@ -2232,6 +2294,32 @@ void FluidSolver3D::applyPressure() {
     }
 }
 
+//####################################################################
+// RIGID BODY FUNCS
+//#############################################
+void FluidSolver3D::updateBody(float dt) {
+// 1. Применяем силы (гравитация + силы от жидкости)
+    float volume = body.size.x * body.size.y * body.size.z;  // Упрощенный расчет объема
+    float3 buoyancy = FLUID_DENSITY * volume * (-1.0f) * GRAVITY;
+    body.force = body.force + buoyancy;
+
+    // 2. Демпфирование
+    body.force = body.force - 0.1f * body.vel;
+
+    // 3. Интегрирование движения
+    float3 acceleration = body.force / body.mass;
+    body.vel = body.vel + acceleration * dt;
+    body.pos = body.pos + body.vel * dt;
+
+    // 4. Обновляем начало SDF в соответствии с новой позицией
+    body.sdf_origin = body.pos - body.size / 2.0f;
+
+    // 5. Сбрасываем силы
+    body.force = make_float3(0.0f, 0.0f, 0.0f);
+}
+
+
+// general loop funcs
 __host__ void FluidSolver3D::frameStep(){
     labelGrid();
 
@@ -2249,6 +2337,8 @@ __host__ void FluidSolver3D::frameStep(){
     gridToParticles(PIC_WEIGHT);
 
     advectParticles(0.1);
+
+    updateBody(dt);
 
 }
 
@@ -2275,6 +2365,11 @@ __host__ void FluidSolver3D::run(int max_steps) {
                     Utility::save3dParticlesToPLY(h_particles, outputTemplate + std::to_string(i/iterPerFrame ) + ".ply");
             }
             std::cout << "frame = " << i / iterPerFrame   << "; numParticles = " << h_particles.size()<<std::endl;
+
+
+            // Генерируем и сохраняем поверхность тела
+            body.generateSurfacePoints(0.5f * dx);  // Плотность точек
+            body.exportToOBJ("body_" + std::to_string(i/iterPerFrame) + ".obj");
         }
 
     }

@@ -1,34 +1,34 @@
 #include "utility.cuh"
 
-__device__ float3 operator+(const float3& a, const float3& b) {
+__host__ __device__ float3 operator+(const float3& a, const float3& b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
-__device__ float3 operator-(const float3& a, const float3& b) {
+__host__ __device__ float3 operator-(const float3& a, const float3& b) {
     return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
-__device__ float3 operator*(const float3& a, float b) {
+__host__ __device__ float3 operator*(const float3& a, float b) {
     return make_float3(a.x * b, a.y * b, a.z * b);
 }
 
-__device__ float3 operator*(float b, const float3& a){
+__host__ __device__ float3 operator*(float b, const float3& a){
     return a * b;
 }
 
-__device__ float operator*(const float3& a, const float3& b){
+__host__ __device__ float operator*(const float3& a, const float3& b){
     return a.x*b.x + a.y*b.y + a.z*b.z;
 }
 
-__device__ float3 operator/(const float3&a, const float&b){
+__host__ __device__ float3 operator/(const float3&a, const float&b){
     return a * (1.0f/b);
 }
 
-__device__ double3 operator+(const double3& a, const double3& b) {
+__host__ __device__ double3 operator+(const double3& a, const double3& b) {
     return make_double3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
-__device__ double3 operator-(const double3& a, const double3& b) {
+__host__ __device__ double3 operator-(const double3& a, const double3& b) {
     return make_double3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
