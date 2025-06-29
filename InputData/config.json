@@ -1,0 +1,10 @@
+{
+  "dt": 0.02,
+  "dx": 0.1,
+  "PIC_WEIGHT": 0.01,
+  "iterPerFrame": 1,
+  "outputFormat": "PLY",
+  "inputLabelData": "InputData/labels_3d_sphere.txt",
+  "frameAmount": 100,
+  "outputTemplate": "OutputData/particles_"
+}
