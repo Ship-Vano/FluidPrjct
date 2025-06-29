@@ -2266,13 +2266,13 @@ __host__ void FluidSolver3D::run(int max_steps) {
             h_particles = d_particles;
             switch(outputFormat){
                 case PLY:
-                    Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i/iterPerFrame ) + ".ply");
+                    Utility::save3dParticlesToPLY(h_particles, outputTemplate + std::to_string(i/iterPerFrame ) + ".ply");
                     break;
                 case OFF:
-                    Utility::save3dParticlesToOFF(h_particles, "InputData/particles_" + std::to_string(i/iterPerFrame ) + ".off");
+                    Utility::save3dParticlesToOFF(h_particles, outputTemplate + std::to_string(i/iterPerFrame ) + ".off");
                     break;
                 default:
-                    Utility::save3dParticlesToPLY(h_particles, "InputData/particles_" + std::to_string(i/iterPerFrame ) + ".ply");
+                    Utility::save3dParticlesToPLY(h_particles, outputTemplate + std::to_string(i/iterPerFrame ) + ".ply");
             }
             std::cout << "frame = " << i / iterPerFrame   << "; numParticles = " << h_particles.size()<<std::endl;
         }

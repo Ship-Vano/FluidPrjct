@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(FluidGPU LANGUAGES CXX CUDA)
 
+include_directories(${CMAKE_SOURCE_DIR}/InputData)
+
 # Включаем расширенные лямбды для CUDA
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extended-lambda")
 
@@ -26,6 +28,7 @@ add_executable(FluidGPU
 target_include_directories(FluidGPU PRIVATE
         ${CMAKE_SOURCE_DIR}/src/json
         ${CMAKE_SOURCE_DIR}/src/FluidSim
+        ${CMAKE_SOURCE_DIR}/InputData
         "${CUDSS_DIR}/include" # Заголовки cuDSS
 )
 

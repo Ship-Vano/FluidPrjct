@@ -183,12 +183,14 @@ namespace Utility {
     };
 
     struct RigidBody{
-        float3 pos;
-        float3 vel;
-        float3 force;
-        float mass;
-//        float3x3 inertia;
-//        float3x3 inv_inertia;
+        float3 pos; // Центр масс
+        float3 vel; // Скорость
+        float3 force; // Суммарная сила
+        float mass; // Масса тела
+        float inertia;       // Момент инерции (скалярное упрощение)
+        float inv_inertia;   // Обратный момент инерции
+//        float3x3 inertia; // Момент инерции
+//        float3x3 inv_inertia; // Обратный момент инерции
 
         // SDF данные
         float* sdf_data;          // Сырой указатель на данные
