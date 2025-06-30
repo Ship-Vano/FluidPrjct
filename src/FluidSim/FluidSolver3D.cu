@@ -122,11 +122,11 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
     Utility::save3dParticlesToPLY(h_particles, "InputData/particles_-1.ply");
 
     // Инициализация тела
-    float3 initial_position = make_float3(1.7f, 1.7f, 1.7f);  // Желаемая начальная позиция
+    float3 initial_position = make_float3(1.7f, 3.0f, 1.7f);  // Желаемая начальная позиция
     body.loadSDF("InputData/ball.sdf", initial_position);
 
     // Физические свойства
-    body.mass = 10.0f;  // Масса в кг
+    body.mass = 50.0f;  // Масса в кг
     body.vel = make_float3(0.0f, 0.0f, 0.0f);
     body.force = make_float3(0.0f, 0.0f, 0.0f);
 
@@ -2300,7 +2300,7 @@ void FluidSolver3D::applyPressure() {
 void FluidSolver3D::updateBody(float dt) {
 // 1. Применяем силы (гравитация + силы от жидкости)
     float volume = body.size.x * body.size.y * body.size.z;  // Упрощенный расчет объема
-    float3 buoyancy = FLUID_DENSITY * volume * (-1.0f) * GRAVITY;
+    float3 buoyancy = FLUID_DENSITY * volume  * GRAVITY;
     body.force = body.force + buoyancy;
 
     // 2. Демпфирование
@@ -2369,7 +2369,7 @@ __host__ void FluidSolver3D::run(int max_steps) {
 
             // Генерируем и сохраняем поверхность тела
             body.generateSurfacePoints(0.5f * dx);  // Плотность точек
-            body.exportToOBJ("body_" + std::to_string(i/iterPerFrame) + ".obj");
+            body.exportToOBJ("OutputData/body_" + std::to_string(i/iterPerFrame) + ".obj");
         }
 
     }
