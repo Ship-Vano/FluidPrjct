@@ -131,9 +131,12 @@ private:
     bool projectParticle(Utility::Particle3D* particle, float max_h);
     void RK3(Utility::Particle3D *particle, float3 initVel, float dt, std::vector<float>& uGrid, std::vector<float>& vGrid, std::vector<float>& wGrid);
     std::vector<int> checkNeighbors(std::vector<int> grid, int3 dim, int3 index, int neighbors[][3], int numNeighbors, int value);
+    float interpolatePressure(const float3& pos);
+    float3 computeSDFGradient(const float3& world_pos) ;
 
     //rigid body funcs
-    void updateBody(float dt);
+    void updateBody();
+    void computeBodyForces();
 
 public:
     float PIC_WEIGHT = 0.5f; // changed in the main

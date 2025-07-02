@@ -65,11 +65,11 @@ namespace Utility {
 
         // Просто записываем x и y как два отдельных float
         for (const auto& p : particles) {
-        float x = p.pos.x;
-        float y = p.pos.y;
-        file.write(reinterpret_cast<const char*>(&x), sizeof(float));
-        file.write(reinterpret_cast<const char*>(&y), sizeof(float));
-            }
+            float x = p.pos.x;
+            float y = p.pos.y;
+            file.write(reinterpret_cast<const char*>(&x), sizeof(float));
+            file.write(reinterpret_cast<const char*>(&y), sizeof(float));
+        }
     }
     void saveParticlesToPLY(const std::vector<Particle2D>& particles,
                             const std::string& filename) {
@@ -89,7 +89,7 @@ namespace Utility {
     }
 
     void save3dParticlesToPLY(const thrust::host_vector<Particle3D>& particles,
-                            const std::string& filename) {
+                              const std::string& filename) {
         std::ofstream file(filename);
         if (!file.is_open()) {
             std::cerr << "Error opening file: " << filename << std::endl;
@@ -160,17 +160,25 @@ namespace Utility {
         return {ind % (gridWidth), ind / (gridWidth)}; // i, j для v-компоненты
     }
 
-    __device__ bool contains(const RigidBody& body, float3 world_pos) {
-        float3 local_pos = (world_pos - body.sdf_origin) / body.sdf_cell_size;
+    __device__ bool contains(float* sdf_data, float3 sdf_origin, float3 world_pos, float sdf_cell_size, int sdf_w, int sdf_h, int sdf_d) {
+        float3 local_pos = (world_pos - sdf_origin) / sdf_cell_size;
         int i = static_cast<int>(local_pos.x);
         int j = static_cast<int>(local_pos.y);
         int k = static_cast<int>(local_pos.z);
 
-        if (i < 0 || i >= body.sdf_dims[0] ||
-            j < 0 || j >= body.sdf_dims[1] ||
-            k < 0 || k >= body.sdf_dims[2]) return false;
+        if (i < 0 || i >= sdf_w ||
+            j < 0 || j >= sdf_h ||
+            k < 0 || k >= sdf_d) return false;
 
-        int idx = i + j * body.sdf_dims[0] + k * body.sdf_dims[0] * body.sdf_dims[1];
-        return body.sdf_data[idx] <= 0.0f;
+        int idx = i + j * sdf_w + k * sdf_w * sdf_h;
+        return sdf_data[idx] <= 0.0f;
+    }
+
+    __device__ float3 cross(const float3& a, const float3& b){
+        return make_float3(
+                a.y * b.z - a.z * b.y,
+                a.z * b.x - a.x * b.z,
+                a.x * b.y - a.y * b.x
+        );
     }
 }
