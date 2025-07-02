@@ -123,12 +123,12 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
     Utility::save3dParticlesToPLY(h_particles, "InputData/particles_-1.ply");
 
     // Инициализация тела
-    float3 initial_position = make_float3(1.7f, 1.6f, 1.7f);  // Желаемая начальная позиция
+    float3 initial_position = make_float3(2.0f, 2.0f, 2.0f);  // Желаемая начальная позиция
     body.loadSDF("InputData/ball.sdf", initial_position);
 
     // Физические свойства
     body.mass = 50.0f;  // Масса в кг
-    body.vel = make_float3(0.0f, 0.0f, 0.0f);
+    body.vel = make_float3(0.0f, -1.0f, 0.0f);
     body.force = make_float3(0.0f, 0.0f, 0.0f);
 
     // Момент инерции (для сферы)
@@ -2578,29 +2578,32 @@ void FluidSolver3D::updateBody() {
     float3 minBound = make_float3(0.0f, 0.0f, 0.0f);
     float3 maxBound = make_float3(gridWidth*dx, gridHeight*dx, gridDepth*dx);
 
-    float r = 0.5f * fmaxf(fmaxf(body.size.x, body.size.y), body.size.z);
+    float r =body.size.x / 2.0f;
 
     if(body.pos.x - r < minBound.x){
         body.pos.x = minBound.x + r;
         body.vel.x = 0.0f;
-    }else{
-        body.pos.x = maxBound.x - r;
-        body.vel.x = 0.0f;
     }
+//    else{
+//        body.pos.x = maxBound.x - r;
+//        body.vel.x = 0.0f;
+//    }
     if(body.pos.y - r < minBound.y){
         body.pos.y = minBound.y + r;
         body.vel.y = 0.0f;
-    }else{
-        body.pos.y = maxBound.y - r;
-        body.vel.y = 0.0f;
     }
+//    else{
+//        body.pos.y = maxBound.y - r;
+//        body.vel.y = 0.0f;
+//    }
     if(body.pos.z - r < minBound.z){
         body.pos.z = minBound.z + r;
         body.vel.z = 0.0f;
-    }else{
-        body.pos.z = maxBound.z - r;
-        body.vel.z = 0.0f;
     }
+//    else{
+//        body.pos.z = maxBound.z - r;
+//        body.vel.z = 0.0f;
+//    }
 
     body.sdf_origin = body.pos - body.size * 0.5f;
 

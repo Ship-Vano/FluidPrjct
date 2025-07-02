@@ -228,11 +228,12 @@ namespace Utility {
             // 2. Читаем начало координат SDF
             std::getline(file, line);
             std::istringstream origin_line(line);
-            origin_line >> sdf_origin.x >> sdf_origin.y >> sdf_origin.z;
+            float3 fileOrigin;
+            origin_line >> fileOrigin.x >> fileOrigin.y >> fileOrigin.z;
             std::cout << "Original SDF origin: ("
-                      << sdf_origin.x << ", "
-                      << sdf_origin.y << ", "
-                      << sdf_origin.z << ")" << std::endl;
+                      << fileOrigin.x << ", "
+                      << fileOrigin.y << ", "
+                      << fileOrigin.z << ")" << std::endl;
 
             // 3. Читаем размер ячейки
             std::getline(file, line);
@@ -246,11 +247,14 @@ namespace Utility {
                     d * sdf_cell_size
             );
 
+            float3 centerInFile = fileOrigin + size*0.5f;
+            float3 T = initial_position - centerInFile;
+
             // 5. Устанавливаем положение центра масс
             pos = initial_position;
-
+            sdf_origin = fileOrigin + T;
             // 6. Корректируем начало SDF под новое положение
-            sdf_origin = pos- size / 2.0f;
+            //sdf_origin = pos- size / 2.0f;
             std::cout << "Adjusted SDF origin: ("
                       << sdf_origin.x << ", "
                       << sdf_origin.y << ", "
@@ -358,6 +362,7 @@ namespace Utility {
             //    так, чтобы её центр снова совпадал с pos
             sdf_origin = pos - size * 0.5f;
             std::cout << "sdf_origin = " << sdf_origin.x << ", " << sdf_origin.y << ", " << sdf_origin.z << std::endl;
+            std::cout << "body.pos = " << pos.x << ", " << pos.y << ", " << pos.z << std::endl;
             // 4) Сбросим накопленные F и τ, чтобы начать новый кадр
             clearAccumulators();
         }
