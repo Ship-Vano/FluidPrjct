@@ -182,6 +182,16 @@ namespace Utility {
         }
     };
 
+    __device__ bool contains(float* sdf_data, float3 sdf_origin, float3 body_pos, float* rotation_matrix, float3 world_pos, float sdf_cell_size, int sdf_w, int sdf_h, int sdf_d);
+
+    __device__ float3 cross(const float3& a, const float3& b);
+
+    __device__ float sampleBody(float3 bodyVel, float3 bodyOmega, float3 bodyCM, float3 facePos, float3 normal); //получить нормальную скорость тела на данной грани
+
+    __host__ __device__ void normalize_quaternion(float4& q);
+    __host__ __device__ float3 quaternion_to_ship_angles(const float4& q);
+    __host__ __device__ float4 multiply_quaternions(const float4& a, const float4& b);
+
     struct RigidBody{
         float3 pos; // Центр масс
         float3 vel; // Скорость
@@ -197,10 +207,15 @@ namespace Utility {
         // Ориентация (кватернион)
         float4 orientation = {0.0f, 0.0f, 0.0f, 1.0f}; // x,y,z,w
         // Матрица вращения (кешированная для производительности)
-        float rotation_matrix[9] = {
+        thrust::host_vector<float> rotation_matrix = {
             1.0f, 0.0f, 0.0f,
             0.0f, 1.0f, 0.0f,
             0.0f, 0.0f, 1.0f
+        };
+        thrust::device_vector<float> rotation_matrix_d = {
+                1.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f,
+                0.0f, 0.0f, 1.0f
         };
 
         // SDF данные
@@ -377,26 +392,77 @@ namespace Utility {
             vel = vel + accel * dt;                // v^{n+1} = v^n + a*dt
             pos = pos + vel * dt;                  // x^{n+1} = x^n + v^{n+1}*dt
 
-            // 2) Угловая динамика (только скалярный момент):
+            // 2) Угловая динамика
             float3 ang_accel = torque * inv_inertia; // α = τ/I
             omega = omega + ang_accel * dt;                // ω^{n+1} = ω^n + α*dt
-            // (тут мы не храним ориентацию, так что вращением SDF не управляем)
+            // Кватернионное представление угловой скорости
+            float4 w_quat = {omega.x, omega.y, omega.z, 0.0f};
+            // Вычисление производной: dq/dt = 0.5 * q * w_quat
+            float4 dq = Utility::multiply_quaternions(orientation, w_quat);
+            dq.x *= 0.5f * dt;
+            dq.y *= 0.5f * dt;
+            dq.z *= 0.5f * dt;
+            dq.w *= 0.5f * dt;
+            // Обновление кватерниона
+            orientation.x += dq.x;
+            orientation.y += dq.y;
+            orientation.z += dq.z;
+            orientation.w += dq.w;
+
+            // Нормализация
+            normalize_quaternion(orientation);
+            update_rotation_matrix();
 
             // 3) Сдвигаем SDF‑origin вместе с pos, чтобы “коробка” SDF двигалась
             //    так, чтобы её центр снова совпадал с pos
-            sdf_origin = pos - size * 0.5f;
+            //sdf_origin = pos - size * 0.5f;
+            float3 local_offset = fileOrigin;
             //std::cout << "sdf_origin = " << sdf_origin.x << ", " << sdf_origin.y << ", " << sdf_origin.z << std::endl;
             //std::cout << "body.pos = " << pos.x << ", " << pos.y << ", " << pos.z << std::endl;
+            // Применяем вращение
+            float3 rotated_offset;
+            rotated_offset.x = rotation_matrix[0]*local_offset.x
+                               + rotation_matrix[1]*local_offset.y
+                               + rotation_matrix[2]*local_offset.z;
+
+            rotated_offset.y = rotation_matrix[3]*local_offset.x
+                               + rotation_matrix[4]*local_offset.y
+                               + rotation_matrix[5]*local_offset.z;
+
+            rotated_offset.z = rotation_matrix[6]*local_offset.x
+                               + rotation_matrix[7]*local_offset.y
+                               + rotation_matrix[8]*local_offset.z;
+
+            // Обновляем мировые координаты SDF
+            sdf_origin = pos + rotated_offset;
+            //sdf_origin = pos - size * 0.5f;
+
             // 4) Сбросим накопленные F и τ, чтобы начать новый кадр
             clearAccumulators();
         }
+
+        // Метод для обновления матрицы вращения из кватерниона
+        void update_rotation_matrix() {
+            float qx = orientation.x;
+            float qy = orientation.y;
+            float qz = orientation.z;
+            float qw = orientation.w;
+
+            rotation_matrix[0] = 1.0f - 2.0f*qy*qy - 2.0f*qz*qz;
+            rotation_matrix[1] = 2.0f*qx*qy - 2.0f*qz*qw;
+            rotation_matrix[2] = 2.0f*qx*qz + 2.0f*qy*qw;
+
+            rotation_matrix[3] = 2.0f*qx*qy + 2.0f*qz*qw;
+            rotation_matrix[4] = 1.0f - 2.0f*qx*qx - 2.0f*qz*qz;
+            rotation_matrix[5] = 2.0f*qy*qz - 2.0f*qx*qw;
+
+            rotation_matrix[6] = 2.0f*qx*qz - 2.0f*qy*qw;
+            rotation_matrix[7] = 2.0f*qy*qz + 2.0f*qx*qw;
+            rotation_matrix[8] = 1.0f - 2.0f*qx*qx - 2.0f*qy*qy;
+
+            rotation_matrix_d = rotation_matrix;
+        }
     };
-
-    __device__ bool contains(float* sdf_data, float3 sdf_origin, float3 world_pos, float sdf_cell_size, int sdf_w, int sdf_h, int sdf_d);
-
-    __device__ float3 cross(const float3& a, const float3& b);
-
-    __device__ float sampleBody(float3 bodyVel, float3 bodyOmega, float3 bodyCM, float3 facePos, float3 normal); //получить нормальную скорость тела на данной грани
 
 
 }

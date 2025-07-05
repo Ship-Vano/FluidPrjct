@@ -106,6 +106,7 @@ private:
 
     //RIGID BODY (DUCK)
     Utility::RigidBody body;
+     std::ofstream csv_file;
 
     // FUNCTIONS
     // solver steps

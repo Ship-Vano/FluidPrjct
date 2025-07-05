@@ -50,13 +50,15 @@ struct MarkBodyCellsFunctor {
     int* labels_ptr;
     int W, H;
     float dx;
+    float3 body_pos;
+    float* rotation_matrix;
 
     __host__ __device__
     MarkBodyCellsFunctor(float* sdf_data_, float3 sdf_orig, float sdf_cell_size_, int sdf_w_, int sdf_h_, int sdf_d_,
-                         int* labels, int width, int height, float cell_size)
+                         int* labels, int width, int height, float cell_size, float3 body_pos_, float* rotation_matrix_)
             : labels_ptr(labels), W(width), H(height), dx(cell_size),
               sdf_data(sdf_data_), sdf_origin(sdf_orig), sdf_cell_size(sdf_cell_size_),
-              sdf_w(sdf_w_), sdf_h(sdf_h_), sdf_d(sdf_d_) {}
+              sdf_w(sdf_w_), sdf_h(sdf_h_), sdf_d(sdf_d_), body_pos(body_pos_), rotation_matrix(rotation_matrix_){}
 
     __device__
     void operator()(int idx) const {
@@ -68,7 +70,7 @@ struct MarkBodyCellsFunctor {
                 (i+0.5f)*dx, (j+0.5f)*dx, (k+0.5f)*dx
         );
 
-        if (Utility::contains( sdf_data, sdf_origin, cell_center, sdf_cell_size, sdf_w, sdf_h, sdf_d) && labels_ptr[idx] != Utility::SOLID) {
+        if (Utility::contains(sdf_data, sdf_origin, body_pos, rotation_matrix, cell_center, sdf_cell_size, sdf_w, sdf_h, sdf_d) && labels_ptr[idx] != Utility::SOLID) {
             labels_ptr[idx] = Utility::BODY;
         }
     }
@@ -180,7 +182,7 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
                     labels.device_ptr(),
                     gridWidth,
                     gridHeight,
-                    dx
+                    dx,body.pos,  thrust::raw_pointer_cast(body.rotation_matrix_d.data())
             }
     );
     cudaDeviceSynchronize();
@@ -354,7 +356,7 @@ __host__ int FluidSolver3D::labelGrid() {
                     labels.device_ptr(),
                     gridWidth,
                     gridHeight,
-                    dx
+                    dx, body.pos,  thrust::raw_pointer_cast(body.rotation_matrix_d.data())
             }
     );
 
@@ -2460,8 +2462,6 @@ struct AccumulateBodyForcesU {
     int W, H, D;
     float dx, dt, rho;
     float3 cm;             // центр масс тела
-    float3 bodyVel;        // линейная скорость тела
-    float3 bodyOmega;      // угловая скорость тела
     const int* labels;     // метки ячеек (W×H×D)
     const float* uStar;    // предварительная скорость U⋆
     const float* uNew;     // скорректированная скорость uⁿ⁺¹
@@ -2476,64 +2476,44 @@ struct AccumulateBodyForcesU {
         int k = tmp / H;
 
         // Определяем соседние ячейки
-        int cellL = -1, cellR = -1;
-        if (i > 0) cellL = (i-1) + j*W + k*W*H;
-        if (i < W) cellR = i + j*W + k*W*H;
-
-        bool leftValid = (cellL >= 0);
-        bool rightValid = (cellR >= 0);
+        int cellL = (i > 0) ? (i-1) + j*W + k*W*H : -1;
+        int cellR = (i < W) ? i + j*W + k*W*H : -1;
 
         // Проверяем, находится ли узел на границе с телом
-        bool onBodyBoundary = false;
-        float sign = 1.0f; // Направление силы
+        bool leftIsFluid = (cellL >= 0) && (labels[cellL] == Utility::FLUID);
+        bool rightIsBody = (cellR >= 0) && (labels[cellR] == Utility::BODY);
+        bool leftIsBody = (cellL >= 0) && (labels[cellL] == Utility::BODY);
+        bool rightIsFluid = (cellR >= 0) && (labels[cellR] == Utility::FLUID);
 
-        // Случай 1: слева жидкость/воздух, справа тело
-        if (leftValid && rightValid) {
-            int leftLabel = labels[cellL];
-            int rightLabel = labels[cellR];
+        // Только границы жидкость-тело
+        if (!((leftIsFluid && rightIsBody) || (leftIsBody && rightIsFluid)))
+            return;
 
-            if ((leftLabel == Utility::FLUID || leftLabel == Utility::AIR) &&
-                rightLabel == Utility::BODY) {
-                onBodyBoundary = true;
-                sign = 1.0f;
-            }
-                // Случай 2: слева тело, справа жидкость/воздух
-            else if (leftLabel == Utility::BODY &&
-                     (rightLabel == Utility::FLUID || rightLabel == Utility::AIR)) {
-                onBodyBoundary = true;
-                sign = -1.0f;
-            }
+        // Направление силы (нормаль к грани)
+        float3 normal;
+        float sign = 1.0f;
+        if (leftIsFluid && rightIsBody) {
+            normal = make_float3(1.0f, 0.0f, 0.0f); // Нормаль вправо
+        } else {
+            normal = make_float3(-1.0f, 0.0f, 0.0f); // Нормаль влево
+            sign = -1.0f;
         }
 
-        if (!onBodyBoundary) return;
-
-        // Вычисляем скорость тела в этой точке
+        // Координата грани
         float3 X = make_float3(i*dx, (j+0.5f)*dx, (k+0.5f)*dx);
-        float3 r = X - cm;
-        float3 bodyVelAtPoint = {
-                bodyVel.x + bodyOmega.y*r.z - bodyOmega.z*r.y,
-                bodyVel.y + bodyOmega.z*r.x - bodyOmega.x*r.z,
-                bodyVel.z + bodyOmega.x*r.y - bodyOmega.y*r.x
-        };
+        float3 r = X - cm;  // Вектор от центра масс к точке приложения силы
 
-        // Разница скоростей (только компонента X)
-        float deltaU = (uNew[idx] - uStar[idx]);
+        // Разница скоростей
+        float deltaU = uNew[idx] - uStar[idx];
 
-        // Корректировка с учетом скорости тела
-        float correctedDeltaU = deltaU - (bodyVelAtPoint.x - uStar[idx]);
+        // Площадь грани
+        float area = dx * dx;
 
-        // Масса жидкости на узле (ρ * dx³)
-        float mass = rho * dx*dx*dx;
+        // Сила реакции (F = -ρ * A * Δu)
+        float3 Fi = normal * (-rho * area * deltaU / dt);
 
-        // Сила реакции (F = -m·Δu/Δt)
-        float3 Fi = make_float3(-mass * correctedDeltaU / dt, 0.0f, 0.0f);
-
-        // Момент: τ = (X - cm) × F
-        float3 torque = {
-                r.y * Fi.z - r.z * Fi.y,
-                r.z * Fi.x - r.x * Fi.z,
-                r.x * Fi.y - r.y * Fi.x
-        };
+        // Момент: τ = r × F
+        float3 torque = Utility::cross(r, Fi);
 
         // Атомарное добавление
         atomicAdd(&forceAcc->x, Fi.x);
@@ -2553,81 +2533,56 @@ struct AccumulateBodyForcesV {
     int W, H, D;
     float dx, dt, rho;
     float3 cm;             // центр масс тела
-    float3 bodyVel;        // линейная скорость тела
-    float3 bodyOmega;      // угловая скорость тела
-    const int* labels;     // размер W×H×D, метки ячеек
+    const int* labels;     // метки ячеек (W×H×D)
     const float* vStar;    // предварительная скорость V⋆
-    const float* vNew;     // скорректированная после tekanan vⁿ⁺¹
-    float3* forceAcc;      // глобальный аккумулятор силы (size = 1)
-    float3* torqueAcc;     // глобальный аккумулятор момента (size = 1)
+    const float* vNew;     // скорректированная скорость vⁿ⁺¹
+    float3* forceAcc;      // аккумулятор силы
+    float3* torqueAcc;     // аккумулятор момента
 
     __device__
     void operator()(int idx) const {
-        // Преобразуем линейный idx → (i,j,k) на решётке V
-        int i = idx % (W);
-        int tmp = idx / (W);
+        int i = idx % W;
+        int tmp = idx / W;
         int j = tmp % (H+1);
         int k = tmp / (H+1);
 
         // Определяем соседние ячейки
-        int cellL = -1, cellR = -1;
-        if (i > 0) cellL = (i-1) + j*W + k*W*H;
-        if (i < W) cellR = i + j*W + k*W*H;
-
-        bool leftValid = (cellL >= 0);
-        bool rightValid = (cellR >= 0);
+        int cellB = (j > 0) ? i + (j-1)*W + k*W*H : -1;
+        int cellT = (j < H) ? i + j*W + k*W*H : -1;
 
         // Проверяем, находится ли узел на границе с телом
-        bool onBodyBoundary = false;
-        float sign = 1.0f; // Направление силы
+        bool bottomIsFluid = (cellB >= 0) && (labels[cellB] == Utility::FLUID);
+        bool topIsBody = (cellT >= 0) && (labels[cellT] == Utility::BODY);
+        bool bottomIsBody = (cellB >= 0) && (labels[cellB] == Utility::BODY);
+        bool topIsFluid = (cellT >= 0) && (labels[cellT] == Utility::FLUID);
 
-        // Случай 1: слева жидкость/воздух, справа тело
-        if (leftValid && rightValid) {
-            int leftLabel = labels[cellL];
-            int rightLabel = labels[cellR];
+        // Только границы жидкость-тело
+        if (!((bottomIsFluid && topIsBody) || (bottomIsBody && topIsFluid)))
+            return;
 
-            if ((leftLabel == Utility::FLUID || leftLabel == Utility::AIR) &&
-                rightLabel == Utility::BODY) {
-                onBodyBoundary = true;
-                sign = 1.0f;
-            }
-                // Случай 2: слева тело, справа жидкость/воздух
-            else if (leftLabel == Utility::BODY &&
-                     (rightLabel == Utility::FLUID || rightLabel == Utility::AIR)) {
-                onBodyBoundary = true;
-                sign = -1.0f;
-            }
+        // Направление силы (нормаль к грани)
+        float3 normal;
+        if (bottomIsFluid && topIsBody) {
+            normal = make_float3(0.0f, 1.0f, 0.0f); // Нормаль вверх
+        } else {
+            normal = make_float3(0.0f, -1.0f, 0.0f); // Нормаль вниз
         }
 
-        if (!onBodyBoundary) return;
+        // Координата грани
+        float3 X = make_float3((i+0.5f)*dx, j*dx, (k+0.5f)*dx);
+        float3 r = X - cm;  // Вектор от центра масс к точке приложения силы
 
-        // Вычисляем скорость тела в этой точке
-        float3 X = make_float3((i+0.5f)*dx, (j)*dx, (k+0.5f)*dx);
-        float3 r = X - cm;
-        float3 bodyVelAtPoint = {
-                bodyVel.x + bodyOmega.y*r.z - bodyOmega.z*r.y,
-                bodyVel.y + bodyOmega.z*r.x - bodyOmega.x*r.z,
-                bodyVel.z + bodyOmega.x*r.y - bodyOmega.y*r.x
-        };
+        // Разница скоростей
+        float deltaV = vNew[idx] - vStar[idx];
 
-        // Разница скоростей (только компонента X)
-        float deltaV = (vNew[idx] - vStar[idx]);
+        // Площадь грани
+        float area = dx * dx;
 
-        // Корректировка с учетом скорости тела
-        float correctedDeltaV = deltaV - (bodyVelAtPoint.y - vStar[idx]);
+        // Сила реакции (F = -ρ * A * Δv)
+        float3 Fi = normal * (-rho * area * deltaV / dt);
 
-        // Масса жидкости на узле (ρ * dx³)
-        float mass = rho * dx*dx*dx;
-
-        // Сила реакции (F = -m·Δu/Δt)
-        float3 Fi = make_float3( 0.0f,-mass * correctedDeltaV / dt, 0.0f);
-
-        // Момент: τ = (X - cm) × F
-        float3 torque = {
-                r.y * Fi.z - r.z * Fi.y,
-                r.z * Fi.x - r.x * Fi.z,
-                r.x * Fi.y - r.y * Fi.x
-        };
+        // Момент: τ = r × F
+        float3 torque = Utility::cross(r, Fi);
 
         // Атомарное добавление
         atomicAdd(&forceAcc->x, Fi.x);
@@ -2645,81 +2600,56 @@ struct AccumulateBodyForcesW {
     int W, H, D;
     float dx, dt, rho;
     float3 cm;             // центр масс тела
-    float3 bodyVel;        // линейная скорость тела
-    float3 bodyOmega;      // угловая скорость тела
-    const int* labels;     // размер W×H×D, метки ячеек
+    const int* labels;     // метки ячеек (W×H×D)
     const float* wStar;    // предварительная скорость W⋆
-    const float* wNew;     // скорректированная после tekanan wⁿ⁺¹
-    float3* forceAcc;      // глобальный аккумулятор силы (size = 1)
-    float3* torqueAcc;     // глобальный аккумулятор момента (size = 1)
+    const float* wNew;     // скорректированная скорость wⁿ⁺¹
+    float3* forceAcc;      // аккумулятор силы
+    float3* torqueAcc;     // аккумулятор момента
 
     __device__
     void operator()(int idx) const {
-        // Преобразуем линейный idx → (i,j,k) на решётке W
-        int i = idx % (W);
-        int tmp = idx / (W);
-        int j = tmp % (H);
-        int k = tmp / (H);
+        int i = idx % W;
+        int tmp = idx / W;
+        int j = tmp % H;
+        int k = tmp / H;
 
         // Определяем соседние ячейки
-        int cellL = -1, cellR = -1;
-        if (i > 0) cellL = (i-1) + j*W + k*W*H;
-        if (i < W) cellR = i + j*W + k*W*H;
-
-        bool leftValid = (cellL >= 0);
-        bool rightValid = (cellR >= 0);
+        int cellBack = (k > 0) ? i + j*W + (k-1)*W*H : -1;
+        int cellFront = (k < D) ? i + j*W + k*W*H : -1;
 
         // Проверяем, находится ли узел на границе с телом
-        bool onBodyBoundary = false;
-        float sign = 1.0f; // Направление силы
+        bool backIsFluid = (cellBack >= 0) && (labels[cellBack] == Utility::FLUID);
+        bool frontIsBody = (cellFront >= 0) && (labels[cellFront] == Utility::BODY);
+        bool backIsBody = (cellBack >= 0) && (labels[cellBack] == Utility::BODY);
+        bool frontIsFluid = (cellFront >= 0) && (labels[cellFront] == Utility::FLUID);
 
-        // Случай 1: слева жидкость/воздух, справа тело
-        if (leftValid && rightValid) {
-            int leftLabel = labels[cellL];
-            int rightLabel = labels[cellR];
+        // Только границы жидкость-тело
+        if (!((backIsFluid && frontIsBody) || (backIsBody && frontIsFluid)))
+            return;
 
-            if ((leftLabel == Utility::FLUID || leftLabel == Utility::AIR) &&
-                rightLabel == Utility::BODY) {
-                onBodyBoundary = true;
-                sign = 1.0f;
-            }
-                // Случай 2: слева тело, справа жидкость/воздух
-            else if (leftLabel == Utility::BODY &&
-                     (rightLabel == Utility::FLUID || rightLabel == Utility::AIR)) {
-                onBodyBoundary = true;
-                sign = -1.0f;
-            }
+        // Направление силы (нормаль к грани)
+        float3 normal;
+        if (backIsFluid && frontIsBody) {
+            normal = make_float3(0.0f, 0.0f, 1.0f); // Нормаль вперед
+        } else {
+            normal = make_float3(0.0f, 0.0f, -1.0f); // Нормаль назад
         }
 
-        if (!onBodyBoundary) return;
+        // Координата грани
+        float3 X = make_float3((i+0.5f)*dx, (j+0.5f)*dx, k*dx);
+        float3 r = X - cm;  // Вектор от центра масс к точке приложения силы
 
-        // Вычисляем скорость тела в этой точке
-        float3 X = make_float3((i+0.5f)*dx, (j)*dx, (k+0.5f)*dx);
-        float3 r = X - cm;
-        float3 bodyVelAtPoint = {
-                bodyVel.x + bodyOmega.y*r.z - bodyOmega.z*r.y,
-                bodyVel.y + bodyOmega.z*r.x - bodyOmega.x*r.z,
-                bodyVel.z + bodyOmega.x*r.y - bodyOmega.y*r.x
-        };
+        // Разница скоростей
+        float deltaW = wNew[idx] - wStar[idx];
 
-        // Разница скоростей (только компонента X)
-        float deltaW = (wNew[idx] - wStar[idx]);
+        // Площадь грани
+        float area = dx * dx;
 
-        // Корректировка с учетом скорости тела
-        float correctedDeltaW = deltaW - (bodyVelAtPoint.z - wStar[idx]);
+        // Сила реакции (F = -ρ * A * Δw)
+        float3 Fi = normal * (-rho * area * deltaW / dt);
 
-        // Масса жидкости на узле (ρ * dx³)
-        float mass = rho * dx*dx*dx;
-
-        // Сила реакции (F = -m·Δu/Δt)
-        float3 Fi = make_float3( 0.0f, 0.0f,-mass * correctedDeltaW / dt);
-
-        // Момент: τ = (X - cm) × F
-        float3 torque = {
-                r.y * Fi.z - r.z * Fi.y,
-                r.z * Fi.x - r.x * Fi.z,
-                r.x * Fi.y - r.y * Fi.x
-        };
+        // Момент: τ = r × F
+        float3 torque = Utility::cross(r, Fi);
 
         // Атомарное добавление
         atomicAdd(&forceAcc->x, Fi.x);
@@ -2758,8 +2688,8 @@ void FluidSolver3D::updateBody() {
                     gridWidth, gridHeight, gridDepth,
                     dx, dt, FLUID_DENSITY,
                     body.pos,
-                    body.vel,
-                    body.omega,
+//                    body.vel,
+//                    body.omega,
                     thrust::raw_pointer_cast(labels.device_data.data()),
                     thrust::raw_pointer_cast(uStar.data()),
                     thrust::raw_pointer_cast(u.device_data.data()),
@@ -2778,8 +2708,6 @@ void FluidSolver3D::updateBody() {
                     gridWidth, gridHeight, gridDepth,
                     dx, dt, FLUID_DENSITY,
                     body.pos,
-                    body.vel,
-                    body.omega,
                     thrust::raw_pointer_cast(labels.device_data.data()),
                     thrust::raw_pointer_cast(vStar.data()),
                     thrust::raw_pointer_cast(v.device_data.data()),
@@ -2798,8 +2726,8 @@ void FluidSolver3D::updateBody() {
                     gridWidth, gridHeight, gridDepth,
                     dx, dt, FLUID_DENSITY,
                     body.pos,
-                    body.vel,
-                    body.omega,
+//                    body.vel,
+//                    body.omega,
                     thrust::raw_pointer_cast(labels.device_data.data()),
                     thrust::raw_pointer_cast(wStar.data()),
                     thrust::raw_pointer_cast(w.device_data.data()),
@@ -2815,8 +2743,8 @@ void FluidSolver3D::updateBody() {
     float3 totalt = torqueAcc[0];
 
     body.force = body.mass * GRAVITY;
-    //body.force  = body.force + 0.01*totalF;
-    //body.torque = body.torque + 0.01*totalt;
+    body.force  = body.force + 0.001*totalF;
+    body.torque = body.torque + 0.001*totalt;
     applyBuoyancy();
 
     // 6) Интегрируем тело
@@ -3017,6 +2945,8 @@ __host__ void FluidSolver3D::frameStep(){
 }
 
 __host__ void FluidSolver3D::run(int max_steps) {
+    csv_file.open("OutputData/csvRes.csv");
+    csv_file << "frame,centerX1,centerX2,centerX3,angleX1,angleX2,angleX3\n";
     d_particles = h_particles;
     // Prepare
     cudaEvent_t start, stop;
@@ -3046,6 +2976,18 @@ __host__ void FluidSolver3D::run(int max_steps) {
             body.exportToPLY("OutputData/body_" + std::to_string(i/iterPerFrame) + ".ply");
 
             saveLabelsToPLY("OutputData/labels_" + std::to_string(i/iterPerFrame) + ".ply");
+
+            float3 angles = Utility::quaternion_to_ship_angles(body.orientation);
+             csv_file << i/iterPerFrame << ","
+                 << body.pos.x << ","
+                  << body.pos.y << ","
+                  << body.pos.z << ","
+                  << angles.x << ","   // Крен (roll)
+                  << angles.y << ","   // Тангаж (pitch)
+                 << angles.z << "\n"; // Рыскание (yaw)   // << std::setprecision(precision)
+
+            // Обеспечиваем немедленную запись на диск
+            csv_file.flush();
         }
 
     }
