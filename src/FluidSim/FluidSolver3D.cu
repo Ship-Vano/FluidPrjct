@@ -42,6 +42,38 @@ FluidSolver3D::~FluidSolver3D(){
     if (stream) cudaStreamDestroy(stream);
 }
 
+struct MarkBodyCellsFunctor {
+    float* sdf_data;
+    float3 sdf_origin;
+    float sdf_cell_size;
+    int sdf_w; int sdf_h; int sdf_d;
+    int* labels_ptr;
+    int W, H;
+    float dx;
+
+    __host__ __device__
+    MarkBodyCellsFunctor(float* sdf_data_, float3 sdf_orig, float sdf_cell_size_, int sdf_w_, int sdf_h_, int sdf_d_,
+                         int* labels, int width, int height, float cell_size)
+            : labels_ptr(labels), W(width), H(height), dx(cell_size),
+              sdf_data(sdf_data_), sdf_origin(sdf_orig), sdf_cell_size(sdf_cell_size_),
+              sdf_w(sdf_w_), sdf_h(sdf_h_), sdf_d(sdf_d_) {}
+
+    __device__
+    void operator()(int idx) const {
+        int i = idx % W;
+        int j = (idx / W) % H;
+        int k = idx / (W*H);
+
+        float3 cell_center = make_float3(
+                (i+0.5f)*dx, (j+0.5f)*dx, (k+0.5f)*dx
+        );
+
+        if (Utility::contains( sdf_data, sdf_origin, cell_center, sdf_cell_size, sdf_w, sdf_h, sdf_d) && labels_ptr[idx] != Utility::SOLID) {
+            labels_ptr[idx] = Utility::BODY;
+        }
+    }
+};
+
 
 __host__ void FluidSolver3D::init(const std::string& fileName) {
     std::ifstream file(fileName);
@@ -117,10 +149,6 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
     }
     labels.copy_to_device();
 
-    // Инициализация частиц
-    seedParticles(PARTICLES_PER_CELL);
-    std::cout <<"Number of particles is" << h_particles.size() << std::endl;
-    Utility::save3dParticlesToPLY(h_particles, "InputData/particles_-1.ply");
 
     // Инициализация тела
     //float3 initial_position = make_float3(1.75f, 2.1f, 1.75f);  // Желаемая начальная позиция
@@ -137,6 +165,33 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
     body.inv_inertia = 1.0f / body.inertia;
     body.omega = make_float3(0.0f, 0.0f, 0.0f); //угловая скорость
     body.torque = make_float3(0.0f,0.0f,0.0f);      // суммарный момент
+
+    thrust::for_each_n(
+            thrust::device,
+            thrust::make_counting_iterator(0),
+            gridWidth* gridHeight * gridDepth,
+            MarkBodyCellsFunctor {
+                    body.sdf_data.device_ptr(),
+                    body.sdf_origin,
+                    body.sdf_cell_size,
+                    body.sdf_data.width(),
+                    body.sdf_data.height(),
+                    body.sdf_data.depth(),
+                    labels.device_ptr(),
+                    gridWidth,
+                    gridHeight,
+                    dx
+            }
+    );
+    cudaDeviceSynchronize();
+    labels.host_data = labels.device_data;
+
+    // Инициализация частиц
+    seedParticles(PARTICLES_PER_CELL);
+    std::cout <<"Number of particles is" << h_particles.size() << std::endl;
+    Utility::save3dParticlesToPLY(h_particles, "InputData/particles_-1.ply");
+
+
 }
 
 struct FluidFlagFunctor {
@@ -272,37 +327,6 @@ struct MarkFluidCellsFunctor {
     }
 };
 
-struct MarkBodyCellsFunctor {
-    float* sdf_data;
-    float3 sdf_origin;
-    float sdf_cell_size;
-    int sdf_w; int sdf_h; int sdf_d;
-    int* labels_ptr;
-    int W, H;
-    float dx;
-
-    __host__ __device__
-    MarkBodyCellsFunctor(float* sdf_data_, float3 sdf_orig, float sdf_cell_size_, int sdf_w_, int sdf_h_, int sdf_d_,
-                         int* labels, int width, int height, float cell_size)
-            : labels_ptr(labels), W(width), H(height), dx(cell_size),
-              sdf_data(sdf_data_), sdf_origin(sdf_orig), sdf_cell_size(sdf_cell_size_),
-              sdf_w(sdf_w_), sdf_h(sdf_h_), sdf_d(sdf_d_) {}
-
-    __device__
-    void operator()(int idx) const {
-        int i = idx % W;
-        int j = (idx / W) % H;
-        int k = idx / (W*H);
-
-        float3 cell_center = make_float3(
-                (i+0.5f)*dx, (j+0.5f)*dx, (k+0.5f)*dx
-        );
-
-        if (Utility::contains( sdf_data, sdf_origin, cell_center, sdf_cell_size, sdf_w, sdf_h, sdf_d) && labels_ptr[idx] != Utility::SOLID) {
-            labels_ptr[idx] = Utility::BODY;
-        }
-    }
-};
 
 __host__ int FluidSolver3D::labelGrid() {
     int totalCells = labels.width() * labels.height() * labels.depth();
@@ -1274,8 +1298,11 @@ struct AdvectParticlesFunctor {
             if (cx >= 0 && cx < W && cy >= 0 && cy < H && cz >= 0 && cz < D) {
                 int idx = cx + cy*W + cz*W*H;
                 if (labels[idx] == Utility::SOLID || labels[idx] == Utility::BODY) {//проверка на попадание в твёрдую границу
-                    if (!projectParticleDevice3D(particle, labels, W, H, D, dx)) //насильно отбрасываем в FLUID (приоритетнее) или в AIR ячейку
+                    if (!projectParticleDevice3D(particle, labels, W, H, D, dx)){ //насильно отбрасываем в FLUID (приоритетнее) или в AIR ячейку
+                        projectParticleDevice3D(particle, labels, W, H, D, dx);
                         break;
+                    }
+
                 }
             }
 
@@ -1957,6 +1984,10 @@ struct UFunctor {
     float        scale;      // = dt / (ρ * dx)
     int          W, H, D;    // размеры сетки (ячейки): W × H × D
     float        VEL_UNKNOWN;
+    float        dx;         // размер ячейки
+    float3       vel_com;    // скорость центра масс тела
+    float3       omega;      // угловая скорость тела
+    float3       com;        // центр масс тела
 
     UFunctor(float*       u_,
              const float* p_,
@@ -1965,9 +1996,14 @@ struct UFunctor {
              int          W_,
              int          H_,
              int          D_,
-             float        vel_unknown)
+             float        vel_unknown,
+             float        dx_,
+             float3       vel_com_,
+             float3       omega_,
+             float3       com_)
             : u(u_), p(p_), labels(labels_), scale(scale_),
-              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
+              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown),
+              dx(dx_), vel_com(vel_com_), omega(omega_), com(com_)  {}
 
     __host__ __device__
     void operator()(int idx) const {
@@ -1978,54 +2014,56 @@ struct UFunctor {
         int rem = idx % sliceSize;
         int jU = rem / (W + 1);
         int iU = rem % (W + 1);
+        int leftIdx  = cellIdx(iU - 1, jU, kU, W, H);
+        int rightIdx = cellIdx(iU, jU, kU, W, H);
 
-        float usolid = 0.0f; // пока что границы неподвижны
+        //float usolid = 0.0f; // пока что границы неподвижны
         float invScale = 1.0f / scale;
         float p0 = 0.0f;
         float p1 = 0.0f;
-        int leftIdx  = cellIdx(iU - 1, jU, kU, W, H);
-        int rightIdx = cellIdx(iU, jU, kU, W, H);
-        if((labels[leftIdx] == Utility::FLUID ||labels[leftIdx] == Utility::AIR) 
-            && (labels[rightIdx] == Utility::FLUID || labels[rightIdx] == Utility::AIR)){
+
+        // Вычисляем координаты центра грани
+        float3 face_pos = make_float3(
+                iU * dx,
+                (jU + 0.5f) * dx,
+                (kU + 0.5f) * dx
+        );
+
+        // Вычисляем скорость тела в точке грани
+        float3 r = make_float3(
+                face_pos.x - com.x,
+                face_pos.y - com.y,
+                face_pos.z - com.z
+        );
+
+        float3 v_body = make_float3(
+                vel_com.x + omega.y * r.z - omega.z * r.y,
+                vel_com.y + omega.z * r.x - omega.x * r.z,
+                vel_com.z + omega.x * r.y - omega.y * r.x
+        );
+
+        // Обработка граничных условий
+        if ((labels[leftIdx] == Utility::FLUID || labels[leftIdx] == Utility::AIR) &&
+            (labels[rightIdx] == Utility::FLUID || labels[rightIdx] == Utility::AIR)) {
             p0 = p[leftIdx];
             p1 = p[rightIdx];
-        } else if(labels[leftIdx] == Utility::SOLID || labels[leftIdx] == Utility::BODY){
+        }
+        else if (labels[leftIdx] == Utility::SOLID || labels[leftIdx] == Utility::BODY) {
+            float usolid = (labels[leftIdx] == Utility::BODY) ? v_body.x : 0.0f;
             p0 = p[rightIdx] - invScale * (u[idx] - usolid);
             p1 = p[rightIdx];
-        } else{
+        }
+        else if (labels[rightIdx] == Utility::SOLID || labels[rightIdx] == Utility::BODY) {
+            float usolid = (labels[rightIdx] == Utility::BODY) ? v_body.x : 0.0f;
             p0 = p[leftIdx];
             p1 = p[leftIdx] + invScale * (u[idx] - usolid);
         }
+        else {
+            p0 = p[leftIdx];
+            p1 = p[rightIdx];
+        }
+
         u[idx] = u[idx] - scale * (p1 - p0);
-        // Коррекцию u делаем только для внутренних граней: iU от 1 до W-1
-        // if (iU > 0 && iU < W) {
-        //     // Соответствующие “левые” и “правые” ячейки:
-        //     // leftCell  = (iU-1, jU, kU)
-        //     // rightCell = (iU,   jU, kU)
-        //     int leftIdx  = cellIdx(iU - 1, jU, kU, W, H);
-        //     int rightIdx = cellIdx(iU, jU, kU, W, H);
-
-        //     bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
-        //     bool rightFluid = (labels[rightIdx] == Utility::FLUID);
-        //     bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
-        //     bool rightSolid = (labels[rightIdx] == Utility::SOLID);
-
-        //     if (leftFluid || rightFluid) {
-        //         // Если хотя бы один сосед FLUID, но нет SOLID — корректируем
-        //         if (leftSolid || rightSolid) {
-        //             // Грань у стены — обнуляем скорость
-        //             u[idx] = 0.0f;
-        //         } else {
-        //             // Коррекция по градиенту: u ← u − scale * (p[right] − p[left])
-        //             float dp = p[rightIdx] - p[leftIdx];
-        //             u[idx] -= scale * dp;
-        //         }
-        //         return;
-        //     }
-        //     return; // внутренняя + слева и справа AIR -> без изменений
-        // }
-        // // Во всех остальных случаях (грань между AIR или на границе) помечаем неизвестной
-        // u[idx] = 0.0f;
     }
 };
 
@@ -2039,6 +2077,10 @@ struct VFunctor {
     float        scale;
     int          W, H, D;
     float        VEL_UNKNOWN;
+    float        dx;         // размер ячейки
+    float3       vel_com;    // скорость центра масс тела
+    float3       omega;      // угловая скорость тела
+    float3       com;        // центр масс тела
 
     VFunctor(float*       v_,
              const float* p_,
@@ -2047,9 +2089,14 @@ struct VFunctor {
              int          W_,
              int          H_,
              int          D_,
-             float        vel_unknown)
+             float        vel_unknown,
+             float        dx_,
+             float3       vel_com_,
+             float3       omega_,
+             float3       com_)
             : v(v_), p(p_), labels(labels_), scale(scale_),
-              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
+              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown),
+              dx(dx_), vel_com(vel_com_), omega(omega_), com(com_) {}
 
     __host__ __device__
     void operator()(int idx) const {
@@ -2059,50 +2106,51 @@ struct VFunctor {
         int rem = idx % sliceSize;
         int jV = rem / W;
         int iV = rem % W;
-        
-        float vsolid = 0.0f; // пока что границы неподвижны
+        int leftIdx  = cellIdx(iV, jV - 1, kV, W, H);
+        int rightIdx = cellIdx(iV, jV, kV, W, H);
+
+        //float vsolid = 0.0f; // пока что границы неподвижны
         float invScale = 1.0f / scale;
         float p0 = 0.0f;
         float p1 = 0.0f;
-        int leftIdx  = cellIdx(iV, jV - 1, kV, W, H);
-        int rightIdx = cellIdx(iV, jV, kV, W, H);
-        if((labels[leftIdx] == Utility::FLUID ||labels[leftIdx] == Utility::AIR) 
-            && (labels[rightIdx] == Utility::FLUID || labels[rightIdx] == Utility::AIR)){
+
+        float3 face_pos = make_float3(
+                (iV + 0.5f) * dx,
+                jV * dx,
+                (kV + 0.5f) * dx
+        );
+        float3 r = make_float3(
+                face_pos.x - com.x,
+                face_pos.y - com.y,
+                face_pos.z - com.z
+        );
+        float3 v_body = make_float3(
+                vel_com.x + omega.y * r.z - omega.z * r.y,
+                vel_com.y + omega.z * r.x - omega.x * r.z,
+                vel_com.z + omega.x * r.y - omega.y * r.x
+        );
+
+        // Обработка граничных условий
+        if ((labels[leftIdx] == Utility::FLUID || labels[leftIdx] == Utility::AIR) &&
+            (labels[rightIdx] == Utility::FLUID || labels[rightIdx] == Utility::AIR)) {
             p0 = p[leftIdx];
             p1 = p[rightIdx];
-        } else if(labels[leftIdx] == Utility::SOLID || labels[leftIdx] == Utility::BODY){
+        }
+        else if (labels[leftIdx] == Utility::SOLID || labels[leftIdx] == Utility::BODY) {
+            float vsolid = (labels[leftIdx] == Utility::BODY) ? v_body.y : 0.0f;
             p0 = p[rightIdx] - invScale * (v[idx] - vsolid);
             p1 = p[rightIdx];
-        } else{
+        }
+        else if (labels[rightIdx] == Utility::SOLID || labels[rightIdx] == Utility::BODY) {
+            float vsolid = (labels[rightIdx] == Utility::BODY) ? v_body.y : 0.0f;
             p0 = p[leftIdx];
             p1 = p[leftIdx] + invScale * (v[idx] - vsolid);
         }
+        else {
+            p0 = p[leftIdx];
+            p1 = p[rightIdx];
+        }
         v[idx] = v[idx] - scale * (p1 - p0);
-
-        // // Коррекция только для внутренних граней: jV от 1 до H-1
-        // if (jV > 0 && jV < H) {
-        //     // leftCell  = (iV, jV-1, kV)
-        //     // rightCell = (iV, jV,   kV)
-        //     int leftIdx  = cellIdx(iV, jV - 1, kV, W, H);
-        //     int rightIdx = cellIdx(iV, jV, kV, W, H);
-
-        //     bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
-        //     bool rightFluid = (labels[rightIdx] == Utility::FLUID);
-        //     bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
-        //     bool rightSolid = (labels[rightIdx] == Utility::SOLID);
-
-        //     if (leftFluid || rightFluid) {
-        //         if (leftSolid || rightSolid) {
-        //             v[idx] = 0.0f;
-        //         } else {
-        //             float dp = p[rightIdx] - p[leftIdx];
-        //             v[idx] -= scale * dp;
-        //         }
-        //         return;
-        //     }
-        //     return;
-        // }
-        // v[idx] = 0.0f;
     }
 };
 
@@ -2116,6 +2164,10 @@ struct WFunctor {
     float        scale;
     int          W, H, D;
     float        VEL_UNKNOWN;
+    float        dx;         // размер ячейки
+    float3       vel_com;    // скорость центра масс тела
+    float3       omega;      // угловая скорость тела
+    float3       com;        // центр масс тела
 
     WFunctor(float*       w_,
              const float* p_,
@@ -2124,9 +2176,14 @@ struct WFunctor {
              int          W_,
              int          H_,
              int          D_,
-             float        vel_unknown)
+             float        vel_unknown,
+             float        dx_,
+             float3       vel_com_,
+             float3       omega_,
+             float3       com_)
             : w(w_), p(p_), labels(labels_), scale(scale_),
-              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
+              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown),
+              dx(dx_), vel_com(vel_com_), omega(omega_), com(com_) {}
 
     __host__ __device__
     void operator()(int idx) const {
@@ -2136,50 +2193,53 @@ struct WFunctor {
         int rem = idx % sliceSize;
         int jW = rem / W;
         int iW = rem % W;
+        int leftIdx  = cellIdx(iW, jW, kW - 1, W, H);
+        int rightIdx = cellIdx(iW, jW, kW, W, H);
 
-        float wsolid = 0.0f; // пока что границы неподвижны
+        //float wsolid = 0.0f; // пока что границы неподвижны
         float invScale = 1.0f / scale;
         float p0 = 0.0f;
         float p1 = 0.0f;
-        int leftIdx  = cellIdx(iW, jW, kW - 1, W, H);
-        int rightIdx = cellIdx(iW, jW, kW, W, H);
-        if((labels[leftIdx] == Utility::FLUID ||labels[leftIdx] == Utility::AIR) 
-            && (labels[rightIdx] == Utility::FLUID || labels[rightIdx] == Utility::AIR)){
+
+        float3 face_pos = make_float3(
+                (iW + 0.5f) * dx,
+                (jW + 0.5f) * dx,
+                kW * dx
+        );
+        float3 r = make_float3(
+                face_pos.x - com.x,
+                face_pos.y - com.y,
+                face_pos.z - com.z
+        );
+        float3 v_body = make_float3(
+                vel_com.x + omega.y * r.z - omega.z * r.y,
+                vel_com.y + omega.z * r.x - omega.x * r.z,
+                vel_com.z + omega.x * r.y - omega.y * r.x
+        );
+
+        // Обработка граничных условий
+        if ((labels[leftIdx] == Utility::FLUID || labels[leftIdx] == Utility::AIR) &&
+            (labels[rightIdx] == Utility::FLUID || labels[rightIdx] == Utility::AIR)) {
             p0 = p[leftIdx];
             p1 = p[rightIdx];
-        } else if(labels[leftIdx] == Utility::SOLID || labels[leftIdx] == Utility::BODY){
+        }
+        else if (labels[leftIdx] == Utility::SOLID || labels[leftIdx] == Utility::BODY) {
+            float wsolid = (labels[leftIdx] == Utility::BODY) ? v_body.z : 0.0f;
             p0 = p[rightIdx] - invScale * (w[idx] - wsolid);
             p1 = p[rightIdx];
-        } else{
+        }
+        else if (labels[rightIdx] == Utility::SOLID || labels[rightIdx] == Utility::BODY) {
+            float wsolid = (labels[rightIdx] == Utility::BODY) ? v_body.z : 0.0f;
             p0 = p[leftIdx];
             p1 = p[leftIdx] + invScale * (w[idx] - wsolid);
         }
+        else {
+            p0 = p[leftIdx];
+            p1 = p[rightIdx];
+        }
+
         w[idx] = w[idx] - scale * (p1 - p0);
 
-        // // Коррекция только для внутренних граней: kW от 1 до D-1
-        // if (kW > 0 && kW < D) {
-        //     // leftCell  = (iW, jW, kW-1)
-        //     // rightCell = (iW, jW, kW)
-        //     int leftIdx  = cellIdx(iW, jW, kW - 1, W, H);
-        //     int rightIdx = cellIdx(iW, jW, kW, W, H);
-
-        //     bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
-        //     bool rightFluid = (labels[rightIdx] == Utility::FLUID);
-        //     bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
-        //     bool rightSolid = (labels[rightIdx] == Utility::SOLID);
-
-        //     if (leftFluid || rightFluid) {
-        //         if (leftSolid || rightSolid) {
-        //             w[idx] = 0.0f;
-        //         } else {
-        //             float dp = p[rightIdx] - p[leftIdx];
-        //             w[idx] -= scale * dp;
-        //         }
-        //         return;
-        //     }
-        //     return;
-        // }
-        // w[idx] = 0.0f;
     }
 };
 
@@ -2215,7 +2275,11 @@ void FluidSolver3D::applyPressure() {
                     gridWidth,
                     gridHeight,
                     gridDepth,
-                    vel_unknown
+                    vel_unknown,
+                    dx,
+                    body.vel,
+                    body.omega,
+                    body.pos
             )
     );
 
@@ -2246,7 +2310,11 @@ void FluidSolver3D::applyPressure() {
                     gridWidth,
                     gridHeight,
                     gridDepth,
-                    vel_unknown
+                    vel_unknown,
+                    dx,
+                    body.vel,
+                    body.omega,
+                    body.pos
             )
     );
 
@@ -2276,7 +2344,11 @@ void FluidSolver3D::applyPressure() {
                     gridWidth,
                     gridHeight,
                     gridDepth,
-                    vel_unknown
+                    vel_unknown,
+                    dx,
+                    body.vel,
+                    body.omega,
+                    body.pos
             )
     );
 
@@ -2604,9 +2676,9 @@ void FluidSolver3D::updateBody() {
 
     body.force = body.mass * GRAVITY;
     // переводим из «импульса» в силу: F_solv = totalF / dt
-    body.force  = body.force + totalF  / dt;
+    //body.force  = body.force + totalF  / dt;
     applyBuoyancy();
-    body.torque = totalt / dt;
+    //body.torque = totalt / dt;
 
     // 6) Интегрируем тело
     body.integrate(dt);

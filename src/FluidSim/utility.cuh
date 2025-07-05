@@ -19,7 +19,6 @@
 #include <thrust/count.h>
 #include <thrust/iterator/permutation_iterator.h>
 
-
 #include <random>
 #include <iostream>
 #include <fstream>

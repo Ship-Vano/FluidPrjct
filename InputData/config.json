@@ -1,5 +1,5 @@
 {
-  "dt": 0.01,
+  "dt": 0.005,
   "dx": 0.02,
   "PIC_WEIGHT": 0.01,
   "iterPerFrame": 1,
@@ -8,7 +8,7 @@
   "frameAmount": 100,
   "outputTemplate": "OutputData/particles_",
   "body_x": 0.5,
-  "body_y": 0.2,
+  "body_y": 0.1,
   "body_z": 0.5,
-  "body_mass": 1.0
+  "body_mass": 0.5
 }
