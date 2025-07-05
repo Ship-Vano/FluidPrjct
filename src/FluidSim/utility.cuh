@@ -194,6 +194,15 @@ namespace Utility {
 //        float3x3 inertia; // Момент инерции
 //        float3x3 inv_inertia; // Обратный момент инерции
 
+        // Ориентация (кватернион)
+        float4 orientation = {0.0f, 0.0f, 0.0f, 1.0f}; // x,y,z,w
+        // Матрица вращения (кешированная для производительности)
+        float rotation_matrix[9] = {
+            1.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 1.0f
+        };
+
         // SDF данные
         Grid3D<float> sdf_data;
         float3 fileOrigin; //локальные координаты начала для sdf
@@ -261,12 +270,27 @@ namespace Utility {
 
             // 7. Читаем данные SDF
             size_t data_size = w * h * d;
-            int cntr = 0;
-            float value;
-            while (file >> value) {
-                sdf_data.host_data[cntr++] = value;
-                //h_sdf.push_back(value);
+             std::vector<float> temp_data(data_size);
+
+            // Порядок: k (слои) → j (строки) → i (столбцы)
+            for (int k = 0; k < d; ++k) {
+                for (int j = 0; j < h; ++j) {
+                    for (int i = 0; i < w; ++i) {
+                        float value;
+                        if (!(file >> value)) {
+                            throw std::runtime_error("Unexpected end of SDF data");
+                        }
+                        // Правильная индексация: i + j*w + k*w*h
+                        int idx = i + j * w + k * w * h;
+                        temp_data[idx] = value;
+                    }
+                }
             }
+
+            //  Копирование в host_data
+            sdf_data.host_data = temp_data;
+            sdf_data.device_data = sdf_data.host_data;
+
 
             // Проверяем количество считанных значений
             if (sdf_data.host_data.size() != data_size) {
@@ -349,6 +373,7 @@ namespace Utility {
         void integrate(float dt) {
             // 1) Линейная динамика (semi-implicit Euler):
             float3 accel = force / mass;      // a = F/M
+            //vel = make_float3(1.0f,0.0f,1.0f);
             vel = vel + accel * dt;                // v^{n+1} = v^n + a*dt
             pos = pos + vel * dt;                  // x^{n+1} = x^n + v^{n+1}*dt
 
@@ -372,6 +397,7 @@ namespace Utility {
     __device__ float3 cross(const float3& a, const float3& b);
 
     __device__ float sampleBody(float3 bodyVel, float3 bodyOmega, float3 bodyCM, float3 facePos, float3 normal); //получить нормальную скорость тела на данной грани
+
 
 }
 

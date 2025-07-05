@@ -160,7 +160,7 @@ namespace Utility {
         return {ind % (gridWidth), ind / (gridWidth)}; // i, j для v-компоненты
     }
 
-    __device__ bool contains(float* sdf_data, float3 sdf_origin, float3 world_pos, float sdf_cell_size, int sdf_w, int sdf_h, int sdf_d) {
+    __device__ bool contains(float* sdf_data, float3 sdf_origin, float3 world_pos, float sdf_cell_size, int sdf_w, int sdf_h, int sdf_d){
         float3 local_pos = (world_pos - sdf_origin) / sdf_cell_size;
         int i = static_cast<int>(local_pos.x);
         int j = static_cast<int>(local_pos.y);

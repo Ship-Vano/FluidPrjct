@@ -1352,6 +1352,10 @@ struct RHSCalculator3D {
     float scale;
     int W, H, D;
     float* rhs_temp;
+    float dx;              // размер ячейки
+    float3 vel_com;        // линейная скорость центра масс
+    float3 omega;          // угловая скорость
+    float3 com;            // центр масс тела
 
     __device__ void operator()(int idx) const {
         int i = idx % W;
@@ -1367,19 +1371,92 @@ struct RHSCalculator3D {
 
         float rhs_val = -scale * div;
 
-        // Solid boundaries
-        if (i-1 >= 0 && labels[idx-1] == Utility::SOLID)
-            rhs_val -= scale * (u[i + j*(W+1) + k*(W+1)*H] - 0.0f); //change 0.0f to solid boundary vel 
-        if (i < W && labels[idx+1] == Utility::SOLID)
-            rhs_val += scale * (u[(i+1) + j*(W+1) + k*(W+1)*H] - 0.0f);
-        if (j-1 >= 0 && labels[idx-W] == Utility::SOLID)
-            rhs_val -= scale * (v[i + j*W + k*W*(H+1)] - 0.0f);
-        if (j < H && labels[idx+W] == Utility::SOLID)
-            rhs_val += scale * (v[i + (j+1)*W + k*W*(H+1)] - 0.0f);
-        if (k-1 >= 0 && labels[idx-W*H] == Utility::SOLID)
-            rhs_val -= scale * (w[i + j*W + k*W*H] - 0.0f);
-        if (k < D && labels[idx+W*H] == Utility::SOLID)
-            rhs_val += scale * (w[i + j*W + (k+1)*W*H] - 0.0f);
+        // Вспомогательная функция для вычисления скорости тела в точке
+        auto get_body_velocity = [&](float3 pos) -> float3 {
+            float3 r = make_float3(pos.x - com.x, pos.y - com.y, pos.z - com.z);
+            return make_float3(
+                    vel_com.x + omega.y * r.z - omega.z * r.y,
+                    vel_com.y + omega.z * r.x - omega.x * r.z,
+                    vel_com.z + omega.x * r.y - omega.y * r.x
+            );
+        };
+
+        // Обработка границ по X
+        if (i-1 >= 0) {
+            int label_left = labels[idx-1];
+            if (label_left == Utility::SOLID || label_left == Utility::BODY) {
+                float3 face_pos = make_float3(i*dx, (j+0.5f)*dx, (k+0.5f)*dx);
+                float usolid = (label_left == Utility::BODY) ?
+                               get_body_velocity(face_pos).x : 0.0f;
+                rhs_val -= scale * (u[i + j*(W+1) + k*(W+1)*H] - usolid);
+            }
+        }
+
+        if (i < W) {
+            int label_right = labels[idx+1];
+            if (label_right == Utility::SOLID || label_right == Utility::BODY) {
+                float3 face_pos = make_float3((i+1)*dx, (j+0.5f)*dx, (k+0.5f)*dx);
+                float usolid = (label_right == Utility::BODY) ?
+                               get_body_velocity(face_pos).x : 0.0f;
+                rhs_val += scale * (u[(i+1) + j*(W+1) + k*(W+1)*H] - usolid);
+            }
+        }
+
+        // Обработка границ по Y
+        if (j-1 >= 0) {
+            int label_bottom = labels[idx-W];
+            if (label_bottom == Utility::SOLID || label_bottom == Utility::BODY) {
+                float3 face_pos = make_float3((i+0.5f)*dx, j*dx, (k+0.5f)*dx);
+                float vsolid = (label_bottom == Utility::BODY) ?
+                               get_body_velocity(face_pos).y : 0.0f;
+                rhs_val -= scale * (v[i + j*W + k*W*(H+1)] - vsolid);
+            }
+        }
+
+        if (j < H) {
+            int label_top = labels[idx+W];
+            if (label_top == Utility::SOLID || label_top == Utility::BODY) {
+                float3 face_pos = make_float3((i+0.5f)*dx, (j+1)*dx, (k+0.5f)*dx);
+                float vsolid = (label_top == Utility::BODY) ?
+                               get_body_velocity(face_pos).y : 0.0f;
+                rhs_val += scale * (v[i + (j+1)*W + k*W*(H+1)] - vsolid);
+            }
+        }
+
+        // Обработка границ по Z
+        if (k-1 >= 0) {
+            int label_back = labels[idx - W*H];
+            if (label_back == Utility::SOLID || label_back == Utility::BODY) {
+                float3 face_pos = make_float3((i+0.5f)*dx, (j+0.5f)*dx, k*dx);
+                float wsolid = (label_back == Utility::BODY) ?
+                               get_body_velocity(face_pos).z : 0.0f;
+                rhs_val -= scale * (w[i + j*W + k*W*H] - wsolid);
+            }
+        }
+
+        if (k < D) {
+            int label_front = labels[idx + W*H];
+            if (label_front == Utility::SOLID || label_front == Utility::BODY) {
+                float3 face_pos = make_float3((i+0.5f)*dx, (j+0.5f)*dx, (k+1)*dx);
+                float wsolid = (label_front == Utility::BODY) ?
+                               get_body_velocity(face_pos).z : 0.0f;
+                rhs_val += scale * (w[i + j*W + (k+1)*W*H] - wsolid);
+            }
+        }
+
+        // Solid boundaries (old ver.)
+//        if (i-1 >= 0 && labels[idx-1] == Utility::SOLID)
+//            rhs_val -= scale * (u[i + j*(W+1) + k*(W+1)*H] - 0.0f); //change 0.0f to solid boundary vel
+//        if (i < W && labels[idx+1] == Utility::SOLID)
+//            rhs_val += scale * (u[(i+1) + j*(W+1) + k*(W+1)*H] - 0.0f);
+//        if (j-1 >= 0 && labels[idx-W] == Utility::SOLID)
+//            rhs_val -= scale * (v[i + j*W + k*W*(H+1)] - 0.0f);
+//        if (j < H && labels[idx+W] == Utility::SOLID)
+//            rhs_val += scale * (v[i + (j+1)*W + k*W*(H+1)] - 0.0f);
+//        if (k-1 >= 0 && labels[idx-W*H] == Utility::SOLID)
+//            rhs_val -= scale * (w[i + j*W + k*W*H] - 0.0f);
+//        if (k < D && labels[idx+W*H] == Utility::SOLID)
+//            rhs_val += scale * (w[i + j*W + (k+1)*W*H] - 0.0f);
         rhs_temp[idx] = rhs_val;
 
     }
@@ -1444,7 +1521,11 @@ void FluidSolver3D::constructRHS(thrust::device_vector<float>& rhs, const thrust
                     w.device_ptr(),
                     scale,
                     gridWidth, gridHeight, gridDepth,
-                    thrust::raw_pointer_cast(rhs_temp.data())
+                    thrust::raw_pointer_cast(rhs_temp.data()),
+                    dx,
+                    body.vel,
+                    body.omega,
+                    body.pos
             }
     );
 
@@ -2376,73 +2457,92 @@ void FluidSolver3D::applyPressure() {
 //#############################################
 // 1) Функтор для накопления локальных реакций по U‑узлам
 struct AccumulateBodyForcesU {
-    // размеры MAC‑решётки U: (W+1)×H×D
     int W, H, D;
-    float dx, inv_dx3;     // inv_dx3 = rho * dx*dx*dx, масса жидкости на MAC‑узел
+    float dx, dt, rho;
     float3 cm;             // центр масс тела
-    float3 bodyVel;        // телесная линейная скорость
-    float3 bodyOmega;      // телесная угловая скорость
-    const int* labels;     // размер W×H×D, метки ячеек
+    float3 bodyVel;        // линейная скорость тела
+    float3 bodyOmega;      // угловая скорость тела
+    const int* labels;     // метки ячеек (W×H×D)
     const float* uStar;    // предварительная скорость U⋆
-    const float* uNew;     // скорректированная после tekanan uⁿ⁺¹
-    float3* forceAcc;      // глобальный аккумулятор силы (size = 1)
-    float3* torqueAcc;     // глобальный аккумулятор момента (size = 1)
+    const float* uNew;     // скорректированная скорость uⁿ⁺¹
+    float3* forceAcc;      // аккумулятор силы
+    float3* torqueAcc;     // аккумулятор момента
 
     __device__
     void operator()(int idx) const {
-        // Преобразуем линейный idx → (i,j,k) на решётке U
         int i = idx % (W+1);
         int tmp = idx / (W+1);
         int j = tmp % H;
         int k = tmp / H;
 
-        // Определяем двух соседних клеток (по X‑направлению):
-        // слева: (i-1, j, k), справа: (i, j, k)
-        bool leftIsFluid  = false;
-        bool rightIsFluid = false;
-        bool leftIsBody   = false;
-        bool rightIsBody  = false;
+        // Определяем соседние ячейки
+        int cellL = -1, cellR = -1;
+        if (i > 0) cellL = (i-1) + j*W + k*W*H;
+        if (i < W) cellR = i + j*W + k*W*H;
 
-        if (i > 0) {
-            int cellL = (i-1) + j*W + k*W*H;
-            leftIsFluid  = labels[cellL] == Utility::FLUID;
-            leftIsBody   = labels[cellL] == Utility::BODY;
+        bool leftValid = (cellL >= 0);
+        bool rightValid = (cellR >= 0);
+
+        // Проверяем, находится ли узел на границе с телом
+        bool onBodyBoundary = false;
+        float sign = 1.0f; // Направление силы
+
+        // Случай 1: слева жидкость/воздух, справа тело
+        if (leftValid && rightValid) {
+            int leftLabel = labels[cellL];
+            int rightLabel = labels[cellR];
+
+            if ((leftLabel == Utility::FLUID || leftLabel == Utility::AIR) &&
+                rightLabel == Utility::BODY) {
+                onBodyBoundary = true;
+                sign = 1.0f;
+            }
+                // Случай 2: слева тело, справа жидкость/воздух
+            else if (leftLabel == Utility::BODY &&
+                     (rightLabel == Utility::FLUID || rightLabel == Utility::AIR)) {
+                onBodyBoundary = true;
+                sign = -1.0f;
+            }
         }
-        if (i < W) {
-            int cellR = i + j*W + k*W*H;
-            rightIsFluid = labels[cellR] == Utility::FLUID;
-            rightIsBody  = labels[cellR] == Utility::BODY;
-        }
 
-        // Нас интересует ровно одна жидкая и одна тело:
-        if (!((leftIsFluid && rightIsBody) || (leftIsBody && rightIsFluid)))
-            return;
+        if (!onBodyBoundary) return;
 
-        // Δu на этом узле
-        float deltaU = uNew[idx] - uStar[idx];
-
-        // масса «жидкости» на этом узле ≈ rho * cellVolume
-        float m = inv_dx3; // = ρ * dx³
-
-        // сила от жидкости на тело (реактивная):  F = −m*Δu / Δt  (минус, т.к. жидкость теряет)
-        // но мы здесь просто собираем m*Δu и разделим на dt уже на хосте
-        float3 Fi = make_float3(-m * deltaU, 0.0f, 0.0f);
-
-        // позиция узла в мире
+        // Вычисляем скорость тела в этой точке
         float3 X = make_float3(i*dx, (j+0.5f)*dx, (k+0.5f)*dx);
+        float3 r = X - cm;
+        float3 bodyVelAtPoint = {
+                bodyVel.x + bodyOmega.y*r.z - bodyOmega.z*r.y,
+                bodyVel.y + bodyOmega.z*r.x - bodyOmega.x*r.z,
+                bodyVel.z + bodyOmega.x*r.y - bodyOmega.y*r.x
+        };
 
-        // реактивный момент: τ = (X−CM) × F
-        float3 ri = X - cm;
-        float3 ti = Utility::cross(ri, Fi);
+        // Разница скоростей (только компонента X)
+        float deltaU = (uNew[idx] - uStar[idx]);
 
-        // атомарно добавить к общему аккумулятору
+        // Корректировка с учетом скорости тела
+        float correctedDeltaU = deltaU - (bodyVelAtPoint.x - uStar[idx]);
+
+        // Масса жидкости на узле (ρ * dx³)
+        float mass = rho * dx*dx*dx;
+
+        // Сила реакции (F = -m·Δu/Δt)
+        float3 Fi = make_float3(-mass * correctedDeltaU / dt, 0.0f, 0.0f);
+
+        // Момент: τ = (X - cm) × F
+        float3 torque = {
+                r.y * Fi.z - r.z * Fi.y,
+                r.z * Fi.x - r.x * Fi.z,
+                r.x * Fi.y - r.y * Fi.x
+        };
+
+        // Атомарное добавление
         atomicAdd(&forceAcc->x, Fi.x);
         atomicAdd(&forceAcc->y, Fi.y);
         atomicAdd(&forceAcc->z, Fi.z);
 
-        atomicAdd(&torqueAcc->x, ti.x);
-        atomicAdd(&torqueAcc->y, ti.y);
-        atomicAdd(&torqueAcc->z, ti.z);
+        atomicAdd(&torqueAcc->x, torque.x);
+        atomicAdd(&torqueAcc->y, torque.y);
+        atomicAdd(&torqueAcc->z, torque.z);
     }
 };
 
@@ -2450,12 +2550,11 @@ struct AccumulateBodyForcesU {
 // Аналогичные функторы для V‑узлов и W‑узлов:
 //   AccumulateBodyForcesV  собирает Fi = (0, −m*Δv, 0); позицию (i+0.5,j,k+0.5)
 struct AccumulateBodyForcesV {
-    // размеры MAC‑решётки V: (W)×(H+1)×D
     int W, H, D;
-    float dx, inv_dx3;     // inv_dx3 = rho * dx*dx*dx, масса жидкости на MAC‑узел
+    float dx, dt, rho;
     float3 cm;             // центр масс тела
-    float3 bodyVel;        // телесная линейная скорость
-    float3 bodyOmega;      // телесная угловая скорость
+    float3 bodyVel;        // линейная скорость тела
+    float3 bodyOmega;      // угловая скорость тела
     const int* labels;     // размер W×H×D, метки ячеек
     const float* vStar;    // предварительная скорость V⋆
     const float* vNew;     // скорректированная после tekanan vⁿ⁺¹
@@ -2470,64 +2569,84 @@ struct AccumulateBodyForcesV {
         int j = tmp % (H+1);
         int k = tmp / (H+1);
 
-        // Определяем двух соседних клеток (по Y‑направлению):
-        // слева: (i, j-1, k), справа: (i, j, k)
-        bool leftIsFluid  = false;
-        bool rightIsFluid = false;
-        bool leftIsBody   = false;
-        bool rightIsBody  = false;
+        // Определяем соседние ячейки
+        int cellL = -1, cellR = -1;
+        if (i > 0) cellL = (i-1) + j*W + k*W*H;
+        if (i < W) cellR = i + j*W + k*W*H;
 
-        if (i > 0) {
-            int cellL = (i) + (j-1)*W + k*W*(H);
-            leftIsFluid  = labels[cellL] == Utility::FLUID;
-            leftIsBody   = labels[cellL] == Utility::BODY;
+        bool leftValid = (cellL >= 0);
+        bool rightValid = (cellR >= 0);
+
+        // Проверяем, находится ли узел на границе с телом
+        bool onBodyBoundary = false;
+        float sign = 1.0f; // Направление силы
+
+        // Случай 1: слева жидкость/воздух, справа тело
+        if (leftValid && rightValid) {
+            int leftLabel = labels[cellL];
+            int rightLabel = labels[cellR];
+
+            if ((leftLabel == Utility::FLUID || leftLabel == Utility::AIR) &&
+                rightLabel == Utility::BODY) {
+                onBodyBoundary = true;
+                sign = 1.0f;
+            }
+                // Случай 2: слева тело, справа жидкость/воздух
+            else if (leftLabel == Utility::BODY &&
+                     (rightLabel == Utility::FLUID || rightLabel == Utility::AIR)) {
+                onBodyBoundary = true;
+                sign = -1.0f;
+            }
         }
-        if (i < W) {
-            int cellR = i + j*W + k*W*H;
-            rightIsFluid = labels[cellR] == Utility::FLUID;
-            rightIsBody  = labels[cellR] == Utility::BODY;
-        }
 
-        // Нас интересует ровно одна жидкая и одна тело:
-        if (!((leftIsFluid && rightIsBody) || (leftIsBody && rightIsFluid)))
-            return;
+        if (!onBodyBoundary) return;
 
-        // Δv на этом узле
-        float deltaV = vNew[idx] - vStar[idx];
-
-        // масса «жидкости» на этом узле ≈ rho * cellVolume
-        float m = inv_dx3; // = ρ * dx³
-
-        // сила от жидкости на тело (реактивная):  F = −m*Δu / Δt  (минус, т.к. жидкость теряет)
-        // но мы здесь просто собираем m*Δu и разделим на dt уже на хосте
-        float3 Fi = make_float3(0.0f, - m * deltaV,  0.0f);
-
-        // позиция узла в мире
+        // Вычисляем скорость тела в этой точке
         float3 X = make_float3((i+0.5f)*dx, (j)*dx, (k+0.5f)*dx);
+        float3 r = X - cm;
+        float3 bodyVelAtPoint = {
+                bodyVel.x + bodyOmega.y*r.z - bodyOmega.z*r.y,
+                bodyVel.y + bodyOmega.z*r.x - bodyOmega.x*r.z,
+                bodyVel.z + bodyOmega.x*r.y - bodyOmega.y*r.x
+        };
 
-        // реактивный момент: τ = (X−CM) × F
-        float3 ri = X - cm;
-        float3 ti = Utility::cross(ri, Fi);
+        // Разница скоростей (только компонента X)
+        float deltaV = (vNew[idx] - vStar[idx]);
 
-        // атомарно добавить к общему аккумулятору
+        // Корректировка с учетом скорости тела
+        float correctedDeltaV = deltaV - (bodyVelAtPoint.y - vStar[idx]);
+
+        // Масса жидкости на узле (ρ * dx³)
+        float mass = rho * dx*dx*dx;
+
+        // Сила реакции (F = -m·Δu/Δt)
+        float3 Fi = make_float3( 0.0f,-mass * correctedDeltaV / dt, 0.0f);
+
+        // Момент: τ = (X - cm) × F
+        float3 torque = {
+                r.y * Fi.z - r.z * Fi.y,
+                r.z * Fi.x - r.x * Fi.z,
+                r.x * Fi.y - r.y * Fi.x
+        };
+
+        // Атомарное добавление
         atomicAdd(&forceAcc->x, Fi.x);
         atomicAdd(&forceAcc->y, Fi.y);
         atomicAdd(&forceAcc->z, Fi.z);
 
-        atomicAdd(&torqueAcc->x, ti.x);
-        atomicAdd(&torqueAcc->y, ti.y);
-        atomicAdd(&torqueAcc->z, ti.z);
+        atomicAdd(&torqueAcc->x, torque.x);
+        atomicAdd(&torqueAcc->y, torque.y);
+        atomicAdd(&torqueAcc->z, torque.z);
     }
 };
 
 //   AccumulateBodyForcesW  собирает Fi = (0,0, −m*Δw); позицию (i+0.5,j+0.5,k)
 struct AccumulateBodyForcesW {
-    // размеры MAC‑решётки W: (W)×(H)×(D+1)
     int W, H, D;
-    float dx, inv_dx3;     // inv_dx3 = rho * dx*dx*dx, масса жидкости на MAC‑узел
+    float dx, dt, rho;
     float3 cm;             // центр масс тела
-    float3 bodyVel;        // телесная линейная скорость
-    float3 bodyOmega;      // телесная угловая скорость
+    float3 bodyVel;        // линейная скорость тела
+    float3 bodyOmega;      // угловая скорость тела
     const int* labels;     // размер W×H×D, метки ячеек
     const float* wStar;    // предварительная скорость W⋆
     const float* wNew;     // скорректированная после tekanan wⁿ⁺¹
@@ -2542,53 +2661,74 @@ struct AccumulateBodyForcesW {
         int j = tmp % (H);
         int k = tmp / (H);
 
-        // Определяем двух соседних клеток (по Z‑направлению):
-        // слева: (i, j, k-1), справа: (i, j, k)
-        bool leftIsFluid  = false;
-        bool rightIsFluid = false;
-        bool leftIsBody   = false;
-        bool rightIsBody  = false;
+        // Определяем соседние ячейки
+        int cellL = -1, cellR = -1;
+        if (i > 0) cellL = (i-1) + j*W + k*W*H;
+        if (i < W) cellR = i + j*W + k*W*H;
 
-        if (i > 0) {
-            int cellL = (i) + (j)*W + (k-1)*W*H;
-            leftIsFluid  = labels[cellL] == Utility::FLUID;
-            leftIsBody   = labels[cellL] == Utility::BODY;
+        bool leftValid = (cellL >= 0);
+        bool rightValid = (cellR >= 0);
+
+        // Проверяем, находится ли узел на границе с телом
+        bool onBodyBoundary = false;
+        float sign = 1.0f; // Направление силы
+
+        // Случай 1: слева жидкость/воздух, справа тело
+        if (leftValid && rightValid) {
+            int leftLabel = labels[cellL];
+            int rightLabel = labels[cellR];
+
+            if ((leftLabel == Utility::FLUID || leftLabel == Utility::AIR) &&
+                rightLabel == Utility::BODY) {
+                onBodyBoundary = true;
+                sign = 1.0f;
+            }
+                // Случай 2: слева тело, справа жидкость/воздух
+            else if (leftLabel == Utility::BODY &&
+                     (rightLabel == Utility::FLUID || rightLabel == Utility::AIR)) {
+                onBodyBoundary = true;
+                sign = -1.0f;
+            }
         }
-        if (i < W) {
-            int cellR = i + j*W + k*W*H;
-            rightIsFluid = labels[cellR] == Utility::FLUID;
-            rightIsBody  = labels[cellR] == Utility::BODY;
-        }
 
-        // Нас интересует ровно одна жидкая и одна тело:
-        if (!((leftIsFluid && rightIsBody) || (leftIsBody && rightIsFluid)))
-            return;
+        if (!onBodyBoundary) return;
 
-        // Δv на этом узле
-        float deltaV = wNew[idx] - wStar[idx];
+        // Вычисляем скорость тела в этой точке
+        float3 X = make_float3((i+0.5f)*dx, (j)*dx, (k+0.5f)*dx);
+        float3 r = X - cm;
+        float3 bodyVelAtPoint = {
+                bodyVel.x + bodyOmega.y*r.z - bodyOmega.z*r.y,
+                bodyVel.y + bodyOmega.z*r.x - bodyOmega.x*r.z,
+                bodyVel.z + bodyOmega.x*r.y - bodyOmega.y*r.x
+        };
 
-        // масса «жидкости» на этом узле ≈ rho * cellVolume
-        float m = inv_dx3; // = ρ * dx³
+        // Разница скоростей (только компонента X)
+        float deltaW = (wNew[idx] - wStar[idx]);
 
-        // сила от жидкости на тело (реактивная):  F = −m*Δu / Δt  (минус, т.к. жидкость теряет)
-        // но мы здесь просто собираем m*Δu и разделим на dt уже на хосте
-        float3 Fi = make_float3(0.0f,  0.0f, -m * deltaV);
+        // Корректировка с учетом скорости тела
+        float correctedDeltaW = deltaW - (bodyVelAtPoint.z - wStar[idx]);
 
-        // позиция узла в мире
-        float3 X = make_float3((i+0.5f)*dx, (j+0.5f)*dx, (k)*dx);
+        // Масса жидкости на узле (ρ * dx³)
+        float mass = rho * dx*dx*dx;
 
-        // реактивный момент: τ = (X−CM) × F
-        float3 ri = X - cm;
-        float3 ti = Utility::cross(ri, Fi);
+        // Сила реакции (F = -m·Δu/Δt)
+        float3 Fi = make_float3( 0.0f, 0.0f,-mass * correctedDeltaW / dt);
 
-        // атомарно добавить к общему аккумулятору
+        // Момент: τ = (X - cm) × F
+        float3 torque = {
+                r.y * Fi.z - r.z * Fi.y,
+                r.z * Fi.x - r.x * Fi.z,
+                r.x * Fi.y - r.y * Fi.x
+        };
+
+        // Атомарное добавление
         atomicAdd(&forceAcc->x, Fi.x);
         atomicAdd(&forceAcc->y, Fi.y);
         atomicAdd(&forceAcc->z, Fi.z);
 
-        atomicAdd(&torqueAcc->x, ti.x);
-        atomicAdd(&torqueAcc->y, ti.y);
-        atomicAdd(&torqueAcc->z, ti.z);
+        atomicAdd(&torqueAcc->x, torque.x);
+        atomicAdd(&torqueAcc->y, torque.y);
+        atomicAdd(&torqueAcc->z, torque.z);
     }
 };
 
@@ -2607,7 +2747,7 @@ void FluidSolver3D::updateBody() {
     thrust::device_vector<float3> forceAcc(1, make_float3(0.0f,0.0f,0.0f));
     thrust::device_vector<float3> torqueAcc(1, make_float3(0.0f,0.0f,0.0f));
 
-    float inv_dx3 = FLUID_DENSITY * dx*dx*dx;  // m_i = ρ·dx³
+    //float inv_dx3 = FLUID_DENSITY * dx*dx*dx;  // m_i = ρ·dx³
 
     // 3) Параллельно проходим по U‑узлам
     thrust::for_each_n(
@@ -2616,7 +2756,7 @@ void FluidSolver3D::updateBody() {
             Usize,
             AccumulateBodyForcesU{
                     gridWidth, gridHeight, gridDepth,
-                    dx, inv_dx3,
+                    dx, dt, FLUID_DENSITY,
                     body.pos,
                     body.vel,
                     body.omega,
@@ -2636,7 +2776,7 @@ void FluidSolver3D::updateBody() {
             Vsize,
             AccumulateBodyForcesV{
                     gridWidth, gridHeight, gridDepth,
-                    dx, inv_dx3,
+                    dx, dt, FLUID_DENSITY,
                     body.pos,
                     body.vel,
                     body.omega,
@@ -2656,7 +2796,7 @@ void FluidSolver3D::updateBody() {
             Wsize,
             AccumulateBodyForcesW{
                     gridWidth, gridHeight, gridDepth,
-                    dx, inv_dx3,
+                    dx, dt, FLUID_DENSITY,
                     body.pos,
                     body.vel,
                     body.omega,
@@ -2675,10 +2815,9 @@ void FluidSolver3D::updateBody() {
     float3 totalt = torqueAcc[0];
 
     body.force = body.mass * GRAVITY;
-    // переводим из «импульса» в силу: F_solv = totalF / dt
-    //body.force  = body.force + totalF  / dt;
+    //body.force  = body.force + 0.01*totalF;
+    //body.torque = body.torque + 0.01*totalt;
     applyBuoyancy();
-    //body.torque = totalt / dt;
 
     // 6) Интегрируем тело
     body.integrate(dt);
@@ -2736,79 +2875,118 @@ void FluidSolver3D::handleBodyWallCollisions() {
     body.sdf_origin = body.pos - body.size * 0.5f;
 }
 
+// Функция для ограничения значения в диапазоне [min_val, max_val]
+template<typename T>
+__host__ __device__ T clamp(T value, T min_val, T max_val) {
+    if (value < min_val) return min_val;
+    if (value > max_val) return max_val;
+    return value;
+}
+
+// Функция для вычисления расстояния между двумя точками в 3D
+__host__ __device__ float distance(const float3& a, const float3& b) {
+    float dx = a.x - b.x;
+    float dy = a.y - b.y;
+    float dz = a.z - b.z;
+    return sqrtf(dx*dx + dy*dy + dz*dz);
+}
 void FluidSolver3D::applyBuoyancy() {
     // 1) Копируем необходимые данные на хост
-    h_particles = d_particles;
     body.sdf_data.copy_to_host();
-    
-    // 2) Находим максимальную высоту жидкости (верхний уровень)
-    float max_y = -FLT_MAX;
-    for (const auto& p : h_particles) {
-        if (p.pos.y > max_y) max_y = p.pos.y;
-    }
-    
-    // 3) Параметры SDF-сетки тела
+    labels.host_data = labels.device_data;
+
+    // 2) Параметры SDF-сетки тела
     int sw = body.sdf_data.width();
     int sh = body.sdf_data.height();
     int sd = body.sdf_data.depth();
     float cs = body.sdf_cell_size;
     float3 origin = body.sdf_origin;
 
-    // 4) Перебираем воксели тела, считаем погруженные
-    int submergedCount = 0;
+    // 3) Создаем grid для быстрого поиска частиц в окрестностях
+    float search_radius = 2.0f * dx;  // радиус поиска частиц
+    std::vector<std::vector<int>> grid(w_x_h_x_d);  // 3D grid для частиц
+    float3 domain_min = make_float3(0.0f,0.0f,0.0f);
+    for(int idx = 0; idx < h_particles.size(); ++idx) {
+        const auto& p = h_particles[idx];
+        int i = clamp(static_cast<int>((p.pos.x - domain_min.x) / dx), 0, gridWidth-1);
+        int j = clamp(static_cast<int>((p.pos.y - domain_min.y) / dx), 0, gridHeight-1);
+        int k = clamp(static_cast<int>((p.pos.z - domain_min.z) / dx), 0, gridDepth-1);
+        grid[i + j*gridWidth + k*gridWidth*gridHeight].push_back(idx);
+    }
+
+    // 4) Перебираем воксели тела, считаем погруженные с учетом реального уровня жидкости
+    float totalVolume = 0.0f;
+    float submergedVolume = 0.0f;
+
     for (int k = 0; k < sd; ++k) {
         for (int j = 0; j < sh; ++j) {
             for (int i = 0; i < sw; ++i) {
                 int sdfIdx = i + j*sw + k*sw*sh;
-                
+                float sdf_val = body.sdf_data.host_data[sdfIdx];
+
                 // Пропускаем внешние воксели (SDF > 0)
-                if (body.sdf_data.host_data[sdfIdx] > 0.0f) 
-                    continue;
-                
+                if (sdf_val > 0.0f) continue;
+
                 // Мировые координаты центра вокселя
                 float3 voxel_center = origin + make_float3(
-                    (i + 0.5f) * cs,
-                    (j + 0.5f) * cs,
-                    (k + 0.5f) * cs
+                        (i + 0.5f) * cs,
+                        (j + 0.5f) * cs,
+                        (k + 0.5f) * cs
                 );
-                
-                // Проверяем, находится ли воксель ниже уровня жидкости
-                if (voxel_center.y < max_y) {
-                    submergedCount++;
+
+                // Объем вокселя (с учетом SDF для частично заполненных)
+                float voxel_vol = cs*cs*cs;
+
+                // Для частично заполненных вокселей корректируем объем
+                if (sdf_val > -cs) {
+                    float fraction = 0.5f - 0.5f * sdf_val / cs;
+                    voxel_vol *= fraction;
+                }
+
+                totalVolume += voxel_vol;
+
+                // Проверяем, находится ли воксель в жидкости
+                int ii = clamp(static_cast<int>((voxel_center.x - domain_min.x) / dx), 0, gridWidth-1);
+                int jj = clamp(static_cast<int>((voxel_center.y - domain_min.y) / dx), 0, gridHeight-1);
+                int kk = clamp(static_cast<int>((voxel_center.z - domain_min.z) / dx), 0, gridDepth-1);
+                int gridIdx = ii + jj*gridWidth + kk*gridWidth*gridHeight;
+
+                // Вариант 1: Проверка по сетке жидкости
+                bool isSubmerged = false;
+                if (labels.host_data[gridIdx] == Utility::FLUID) {
+                    isSubmerged = true;
+                }
+                    // Вариант 2: Проверка по близости к частицам (более точный)
+                else {
+                    for (int pidx : grid[gridIdx]) {
+                        const auto& p = h_particles[pidx];
+                        if (distance(p.pos, voxel_center) < search_radius) {
+                            isSubmerged = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (isSubmerged) {
+                    submergedVolume += voxel_vol;
                 }
             }
         }
     }
-//    if(submergedCount > 0){
-//        std::cout << "\n##########\n#########\nHOORAY!!!!\n########\n######"<<std::endl;
-//    }
-    //std::cout << "submergedCount = " << submergedCount << std::endl;
-    //std::cout << "max_y = " << max_y << std::endl;
 
-    // 5) Вычисляем объём вытесненной жидкости
-    float Vsub = submergedCount * cs * cs * cs;
+    // 5) Архимедова сила: F_arch = ρ_fluid · V_submerged · g
+    float3 F_arch = -FLUID_DENSITY * submergedVolume * GRAVITY;
 
-    // 6) Архимедова сила: F_arch = ρ·Vsub·(−g)
-    float3 F_arch = -FLUID_DENSITY * Vsub * GRAVITY;
+    // 6) Добавляем демпфирование для стабилизации
+    float damping = 0.1f;
+    body.force = body.force + F_arch - damping * body.vel * body.mass;
 
-    // 7) Прибавляем к накопленной силе тела
-    body.force = body.force + F_arch;
-    
-    // 8) Для отладки: сохраняем погруженные воксели
-    // std::vector<float3> submergedVoxels;
-    // for (int k = 0; k < sd; ++k) {
-    //     for (int j = 0; j < sh; ++j) {
-    //         for (int i = 0; i < sw; ++i) {
-    //             int sdfIdx = i + j*sw + k*sw*sh;
-    //             if (body.sdf_data.host_data[sdfIdx] > 0.0f) continue;
-    //             float3 c = origin + make_float3((i+0.5f)*cs, (j+0.5f)*cs, (k+0.5f)*cs);
-    //             if (c.y < max_y) {
-    //                 submergedVoxels.push_back(c);
-    //             }
-    //         }
-    //     }
-    // }
-    // Utility::savePointsToPLY(submergedVoxels, "OutputData/submerged.ply");
+    // Отладочная информация
+    std::cout << "Submerged volume: " << submergedVolume
+              << " / " << totalVolume
+              << " (" << (submergedVolume/totalVolume)*100 << "%)"
+              << " Force: " << F_arch.x << ", " << F_arch.y << ", " << F_arch.z
+              << std::endl;
 }
 
 //##############################
@@ -2864,7 +3042,7 @@ __host__ void FluidSolver3D::run(int max_steps) {
 
 
             // Генерируем и сохраняем поверхность тела
-            body.generateSurfacePoints(0.5f * dx);  // Плотность точек
+            body.generateSurfacePoints(0.5*dx);  // Плотность точек
             body.exportToPLY("OutputData/body_" + std::to_string(i/iterPerFrame) + ".ply");
 
             saveLabelsToPLY("OutputData/labels_" + std::to_string(i/iterPerFrame) + ".ply");
@@ -2923,13 +3101,13 @@ void FluidSolver3D::saveLabelsToPLY(const std::string& filename) {
         return;
     }
     
-    // Считаем количество не-AIR ячеек
+    // Считаем количество не-AIR ячеек и не-SOlid
     size_t count = 0;
     for (int k = 0; k < gridDepth; k++) {
         for (int j = 0; j < gridHeight; j++) {
             for (int i = 0; i < gridWidth; i++) {
                 int idx = i + j * gridWidth + k * gridWidth * gridHeight;
-                if (labels_h[idx] != Utility::AIR) count++;
+                if (labels_h[idx] != Utility::AIR && labels_h[idx] != Utility::SOLID && labels_h[idx] != Utility::FLUID) count++;
             }
         }
     }
@@ -2953,7 +3131,7 @@ void FluidSolver3D::saveLabelsToPLY(const std::string& filename) {
                 int idx = i + j * gridWidth + k * gridWidth * gridHeight;
                 int label = labels_h[idx];
                 
-                if (label == Utility::AIR) continue;
+                if (label == Utility::AIR || label == Utility::SOLID|| label == Utility::FLUID) continue;
                 
                 // Центр ячейки
                 float x = (i + 0.5f) * dx;

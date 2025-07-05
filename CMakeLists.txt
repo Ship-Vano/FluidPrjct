@@ -16,7 +16,6 @@ set(CUDSS_DIR "$ENV{HOME}/cudss")  # Путь к cuDSS
 
 add_executable(FluidGPU
         src/FluidSim/utility.cu
-        src/FluidSim/FluidSolver2D.cu
         src/FluidSim/FluidSolver3D.cu
         src/FluidSim/test.cu
         src/json/jsoncpp.cpp
