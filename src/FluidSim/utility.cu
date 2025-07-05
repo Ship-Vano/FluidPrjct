@@ -181,4 +181,10 @@ namespace Utility {
                 a.x * b.y - a.y * b.x
         );
     }
+
+    __device__ float sampleBody(float3 bodyVel, float3 bodyOmega, float3 bodyCM, float3 facePos, float3 normal){
+        float3 vel = bodyVel + cross(bodyOmega, facePos - bodyCM);
+        return vel * normal;
+    }
+
 }

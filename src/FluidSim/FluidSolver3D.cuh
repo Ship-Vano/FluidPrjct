@@ -133,10 +133,15 @@ private:
     std::vector<int> checkNeighbors(std::vector<int> grid, int3 dim, int3 index, int neighbors[][3], int numNeighbors, int value);
     float interpolatePressure(const float3& pos);
     float3 computeSDFGradient(const float3& world_pos) ;
+    void saveLabelsToPLY(const std::string& filename);
 
     //rigid body funcs
     void updateBody();
     void computeBodyForces();
+    void handleBodyWallCollisions();
+    void applyBuoyancy();
+
+
 
 public:
     float PIC_WEIGHT = 0.5f; // changed in the main

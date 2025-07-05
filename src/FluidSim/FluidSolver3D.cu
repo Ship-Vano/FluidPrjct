@@ -123,12 +123,12 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
     Utility::save3dParticlesToPLY(h_particles, "InputData/particles_-1.ply");
 
     // Инициализация тела
-    float3 initial_position = make_float3(2.0f, 2.0f, 2.0f);  // Желаемая начальная позиция
+    float3 initial_position = make_float3(1.75f, 2.1f, 1.75f);  // Желаемая начальная позиция
     body.loadSDF("InputData/ball.sdf", initial_position);
 
     // Физические свойства
-    body.mass = 50.0f;  // Масса в кг
-    body.vel = make_float3(0.0f, -1.0f, 0.0f);
+    body.mass = 200.0f;  // Масса в кг
+    body.vel = make_float3(0.0f, 0.0f, 0.0f);
     body.force = make_float3(0.0f, 0.0f, 0.0f);
 
     // Момент инерции (для сферы)
@@ -136,7 +136,7 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
     body.inertia = 0.4f * body.mass * radius * radius;
     body.inv_inertia = 1.0f / body.inertia;
     body.omega = make_float3(0.0f, 0.0f, 0.0f); //угловая скорость
-    body.torque = make_float3(0,0,0);      // суммарный момент
+    body.torque = make_float3(0.0f,0.0f,0.0f);      // суммарный момент
 }
 
 struct FluidFlagFunctor {
@@ -316,6 +316,24 @@ __host__ int FluidSolver3D::labelGrid() {
             ClearNonSolidFunctor()
     );
 
+     thrust::for_each_n(
+            thrust::device,
+            thrust::make_counting_iterator(0),
+            gridWidth* gridHeight * gridDepth,
+            MarkBodyCellsFunctor {
+                    body.sdf_data.device_ptr(),
+                    body.sdf_origin,
+                    body.sdf_cell_size,
+                    body.sdf_data.width(),
+                    body.sdf_data.height(),
+                    body.sdf_data.depth(),
+                    labels.device_ptr(),
+                    gridWidth,
+                    gridHeight,
+                    dx
+            }
+    );
+
     // 2) Пометка FLUID-ячееk по текущим частицам
     int numParticles = static_cast<int>(d_particles.size());
     if (numParticles > 0) {
@@ -333,24 +351,7 @@ __host__ int FluidSolver3D::labelGrid() {
         );
     }
 
-    // Запускаем вычисления
-    thrust::for_each_n(
-            thrust::device,
-            thrust::make_counting_iterator(0),
-            gridWidth* gridHeight * gridDepth,
-            MarkBodyCellsFunctor {
-                    body.sdf_data.device_ptr(),
-                    body.sdf_origin,
-                    body.sdf_cell_size,
-                    body.sdf_data.width(),
-                    body.sdf_data.height(),
-                    body.sdf_data.depth(),
-                    labels.device_ptr(),
-                    gridWidth,
-                    gridHeight,
-                    dx
-            }
-    );
+   
 
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
@@ -1341,7 +1342,7 @@ struct RHSCalculator3D {
 
         // Solid boundaries
         if (i-1 >= 0 && labels[idx-1] == Utility::SOLID)
-            rhs_val -= scale * (u[i + j*(W+1) + k*(W+1)*H] - 0.0f); //change 0.0f to solid boundary vel
+            rhs_val -= scale * (u[i + j*(W+1) + k*(W+1)*H] - 0.0f); //change 0.0f to solid boundary vel 
         if (i < W && labels[idx+1] == Utility::SOLID)
             rhs_val += scale * (u[(i+1) + j*(W+1) + k*(W+1)*H] - 0.0f);
         if (j-1 >= 0 && labels[idx-W] == Utility::SOLID)
@@ -1352,7 +1353,6 @@ struct RHSCalculator3D {
             rhs_val -= scale * (w[i + j*W + k*W*H] - 0.0f);
         if (k < D && labels[idx+W*H] == Utility::SOLID)
             rhs_val += scale * (w[i + j*W + (k+1)*W*H] - 0.0f);
-
         rhs_temp[idx] = rhs_val;
 
     }
@@ -1566,7 +1566,7 @@ struct MatrixFiller3D {
                 {0,0,1}, {0,0,-1}
         };
 
-        for (int n = 0; n < 6; n++) {
+        for (int n = 0; n < 6; ++n) {
             int ni = i + offsets[n][0];
             int nj = j + offsets[n][1];
             int nk = k + offsets[n][2];
@@ -1950,9 +1950,6 @@ inline int cellIdx(int i, int j, int k, int W, int H) {
     return i + j * W + k * (W * H);
 }
 
-// ----------------------------------
-// Функтор для коррекции U-скоростей (MAC-грань по X)
-// uSize = (W+1) × H × D
 struct UFunctor {
     float*       u;          // массив U-скоростей (face-centered по X), размер (W+1)*H*D
     const float* p;          // массив давлений на центрах ячеек, размер W*H*D
@@ -1960,7 +1957,6 @@ struct UFunctor {
     float        scale;      // = dt / (ρ * dx)
     int          W, H, D;    // размеры сетки (ячейки): W × H × D
     float        VEL_UNKNOWN;
-    float3       body_vel;
 
     UFunctor(float*       u_,
              const float* p_,
@@ -1969,10 +1965,9 @@ struct UFunctor {
              int          W_,
              int          H_,
              int          D_,
-             float        vel_unknown,
-             float3       body_vel_)
+             float        vel_unknown)
             : u(u_), p(p_), labels(labels_), scale(scale_),
-              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown), body_vel(body_vel_) {}
+              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
 
     __host__ __device__
     void operator()(int idx) const {
@@ -1990,22 +1985,47 @@ struct UFunctor {
         float p1 = 0.0f;
         int leftIdx  = cellIdx(iU - 1, jU, kU, W, H);
         int rightIdx = cellIdx(iU, jU, kU, W, H);
-        if(labels[leftIdx] != Utility::SOLID && labels[rightIdx] != Utility::SOLID
-           && labels[leftIdx] != Utility::BODY && labels[rightIdx] != Utility::BODY){ //air or fluid both
+        if((labels[leftIdx] == Utility::FLUID ||labels[leftIdx] == Utility::AIR) 
+            && (labels[rightIdx] == Utility::FLUID || labels[rightIdx] == Utility::AIR)){
             p0 = p[leftIdx];
             p1 = p[rightIdx];
-        } else if(labels[leftIdx] == Utility::SOLID  || labels[leftIdx] == Utility::BODY){
-            //float solid_vel = (labels[leftIdx] == Utility::BODY) ? body_vel.x : 0.0f;
-            //p0 = p[rightIdx] - invScale * (u[idx] - solid_vel);
+        } else if(labels[leftIdx] == Utility::SOLID || labels[leftIdx] == Utility::BODY){
             p0 = p[rightIdx] - invScale * (u[idx] - usolid);
             p1 = p[rightIdx];
         } else{
             p0 = p[leftIdx];
-            //float solid_vel = (labels[rightIdx] == Utility::BODY) ? body_vel.x : 0.0f;
-            //p1 = p[rightIdx] + invScale * (u[idx] - solid_vel);
             p1 = p[leftIdx] + invScale * (u[idx] - usolid);
         }
         u[idx] = u[idx] - scale * (p1 - p0);
+        // Коррекцию u делаем только для внутренних граней: iU от 1 до W-1
+        // if (iU > 0 && iU < W) {
+        //     // Соответствующие “левые” и “правые” ячейки:
+        //     // leftCell  = (iU-1, jU, kU)
+        //     // rightCell = (iU,   jU, kU)
+        //     int leftIdx  = cellIdx(iU - 1, jU, kU, W, H);
+        //     int rightIdx = cellIdx(iU, jU, kU, W, H);
+
+        //     bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
+        //     bool rightFluid = (labels[rightIdx] == Utility::FLUID);
+        //     bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
+        //     bool rightSolid = (labels[rightIdx] == Utility::SOLID);
+
+        //     if (leftFluid || rightFluid) {
+        //         // Если хотя бы один сосед FLUID, но нет SOLID — корректируем
+        //         if (leftSolid || rightSolid) {
+        //             // Грань у стены — обнуляем скорость
+        //             u[idx] = 0.0f;
+        //         } else {
+        //             // Коррекция по градиенту: u ← u − scale * (p[right] − p[left])
+        //             float dp = p[rightIdx] - p[leftIdx];
+        //             u[idx] -= scale * dp;
+        //         }
+        //         return;
+        //     }
+        //     return; // внутренняя + слева и справа AIR -> без изменений
+        // }
+        // // Во всех остальных случаях (грань между AIR или на границе) помечаем неизвестной
+        // u[idx] = 0.0f;
     }
 };
 
@@ -2019,7 +2039,6 @@ struct VFunctor {
     float        scale;
     int          W, H, D;
     float        VEL_UNKNOWN;
-    float3       body_vel;
 
     VFunctor(float*       v_,
              const float* p_,
@@ -2028,10 +2047,9 @@ struct VFunctor {
              int          W_,
              int          H_,
              int          D_,
-             float        vel_unknown,
-             float3       body_vel_)
+             float        vel_unknown)
             : v(v_), p(p_), labels(labels_), scale(scale_),
-              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown), body_vel(body_vel_)  {}
+              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
 
     __host__ __device__
     void operator()(int idx) const {
@@ -2041,39 +2059,50 @@ struct VFunctor {
         int rem = idx % sliceSize;
         int jV = rem / W;
         int iV = rem % W;
-
+        
         float vsolid = 0.0f; // пока что границы неподвижны
         float invScale = 1.0f / scale;
         float p0 = 0.0f;
         float p1 = 0.0f;
         int leftIdx  = cellIdx(iV, jV - 1, kV, W, H);
         int rightIdx = cellIdx(iV, jV, kV, W, H);
-         if(labels[leftIdx] != Utility::SOLID && labels[rightIdx] != Utility::SOLID){
-             p0 = p[leftIdx];
-             p1 = p[rightIdx];
-         } else if(labels[leftIdx] == Utility::SOLID){
-             p0 = p[rightIdx] - invScale * (v[idx] - vsolid);
-             p1 = p[rightIdx];
-         } else{
-             p0 = p[leftIdx];
-             p1 = p[leftIdx] + invScale * (v[idx] - vsolid);
-         }
-//        if(labels[leftIdx] != Utility::SOLID && labels[rightIdx] != Utility::SOLID
-//           && labels[leftIdx] != Utility::BODY && labels[rightIdx] != Utility::BODY){ //air or fluid both
-//            p0 = p[leftIdx];
-//            p1 = p[rightIdx];
-//        } else if(labels[leftIdx] == Utility::SOLID  || labels[leftIdx] == Utility::BODY){
-//            float solid_vel = (labels[leftIdx] == Utility::BODY) ? body_vel.y : 0.0f;
-//            p0 = p[rightIdx] - invScale * (v[idx] - solid_vel);
-//            //p0 = p[rightIdx] - invScale * (v[idx] - usolid);
-//            p1 = p[rightIdx];
-//        } else{
-//            p0 = p[leftIdx];
-//            float solid_vel = (labels[rightIdx] == Utility::BODY) ? body_vel.y : 0.0f;
-//            p1 = p[rightIdx] + invScale * (v[idx] - solid_vel);
-//            //p1 = p[leftIdx] + invScale * (v[idx] - usolid);
-//        }
+        if((labels[leftIdx] == Utility::FLUID ||labels[leftIdx] == Utility::AIR) 
+            && (labels[rightIdx] == Utility::FLUID || labels[rightIdx] == Utility::AIR)){
+            p0 = p[leftIdx];
+            p1 = p[rightIdx];
+        } else if(labels[leftIdx] == Utility::SOLID || labels[leftIdx] == Utility::BODY){
+            p0 = p[rightIdx] - invScale * (v[idx] - vsolid);
+            p1 = p[rightIdx];
+        } else{
+            p0 = p[leftIdx];
+            p1 = p[leftIdx] + invScale * (v[idx] - vsolid);
+        }
         v[idx] = v[idx] - scale * (p1 - p0);
+
+        // // Коррекция только для внутренних граней: jV от 1 до H-1
+        // if (jV > 0 && jV < H) {
+        //     // leftCell  = (iV, jV-1, kV)
+        //     // rightCell = (iV, jV,   kV)
+        //     int leftIdx  = cellIdx(iV, jV - 1, kV, W, H);
+        //     int rightIdx = cellIdx(iV, jV, kV, W, H);
+
+        //     bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
+        //     bool rightFluid = (labels[rightIdx] == Utility::FLUID);
+        //     bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
+        //     bool rightSolid = (labels[rightIdx] == Utility::SOLID);
+
+        //     if (leftFluid || rightFluid) {
+        //         if (leftSolid || rightSolid) {
+        //             v[idx] = 0.0f;
+        //         } else {
+        //             float dp = p[rightIdx] - p[leftIdx];
+        //             v[idx] -= scale * dp;
+        //         }
+        //         return;
+        //     }
+        //     return;
+        // }
+        // v[idx] = 0.0f;
     }
 };
 
@@ -2087,7 +2116,6 @@ struct WFunctor {
     float        scale;
     int          W, H, D;
     float        VEL_UNKNOWN;
-    float3       body_vel;
 
     WFunctor(float*       w_,
              const float* p_,
@@ -2096,10 +2124,9 @@ struct WFunctor {
              int          W_,
              int          H_,
              int          D_,
-             float        vel_unknown,
-             float3       body_vel_)
+             float        vel_unknown)
             : w(w_), p(p_), labels(labels_), scale(scale_),
-              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown), body_vel(body_vel_)  {}
+              W(W_), H(H_), D(D_), VEL_UNKNOWN(vel_unknown) {}
 
     __host__ __device__
     void operator()(int idx) const {
@@ -2116,32 +2143,43 @@ struct WFunctor {
         float p1 = 0.0f;
         int leftIdx  = cellIdx(iW, jW, kW - 1, W, H);
         int rightIdx = cellIdx(iW, jW, kW, W, H);
-         if(labels[leftIdx] != Utility::SOLID && labels[rightIdx] != Utility::SOLID){
-             p0 = p[leftIdx];
-             p1 = p[rightIdx];
-         } else if(labels[leftIdx] == Utility::SOLID){
-             p0 = p[rightIdx] - invScale * (w[idx] - wsolid);
-             p1 = p[rightIdx];
-         } else{
-             p0 = p[leftIdx];
-             p1 = p[leftIdx] + invScale * (w[idx] - wsolid);
-         }
-//        if(labels[leftIdx] != Utility::SOLID && labels[rightIdx] != Utility::SOLID
-//           && labels[leftIdx] != Utility::BODY && labels[rightIdx] != Utility::BODY){ //air or fluid both
-//            p0 = p[leftIdx];
-//            p1 = p[rightIdx];
-//        } else if(labels[leftIdx] == Utility::SOLID  || labels[leftIdx] == Utility::BODY){
-//            float solid_vel = (labels[leftIdx] == Utility::BODY) ? body_vel.z : 0.0f;
-//            p0 = p[rightIdx] - invScale * (w[idx] - solid_vel);
-//            //p0 = p[rightIdx] - invScale * (v[idx] - usolid);
-//            p1 = p[rightIdx];
-//        } else{
-//            p0 = p[leftIdx];
-//            float solid_vel = (labels[rightIdx] == Utility::BODY) ? body_vel.z : 0.0f;
-//            p1 = p[rightIdx] + invScale * (w[idx] - solid_vel);
-//            //p1 = p[leftIdx] + invScale * (v[idx] - usolid);
-//        }
+        if((labels[leftIdx] == Utility::FLUID ||labels[leftIdx] == Utility::AIR) 
+            && (labels[rightIdx] == Utility::FLUID || labels[rightIdx] == Utility::AIR)){
+            p0 = p[leftIdx];
+            p1 = p[rightIdx];
+        } else if(labels[leftIdx] == Utility::SOLID || labels[leftIdx] == Utility::BODY){
+            p0 = p[rightIdx] - invScale * (w[idx] - wsolid);
+            p1 = p[rightIdx];
+        } else{
+            p0 = p[leftIdx];
+            p1 = p[leftIdx] + invScale * (w[idx] - wsolid);
+        }
         w[idx] = w[idx] - scale * (p1 - p0);
+
+        // // Коррекция только для внутренних граней: kW от 1 до D-1
+        // if (kW > 0 && kW < D) {
+        //     // leftCell  = (iW, jW, kW-1)
+        //     // rightCell = (iW, jW, kW)
+        //     int leftIdx  = cellIdx(iW, jW, kW - 1, W, H);
+        //     int rightIdx = cellIdx(iW, jW, kW, W, H);
+
+        //     bool leftFluid  = (labels[leftIdx]  == Utility::FLUID);
+        //     bool rightFluid = (labels[rightIdx] == Utility::FLUID);
+        //     bool leftSolid  = (labels[leftIdx]  == Utility::SOLID);
+        //     bool rightSolid = (labels[rightIdx] == Utility::SOLID);
+
+        //     if (leftFluid || rightFluid) {
+        //         if (leftSolid || rightSolid) {
+        //             w[idx] = 0.0f;
+        //         } else {
+        //             float dp = p[rightIdx] - p[leftIdx];
+        //             w[idx] -= scale * dp;
+        //         }
+        //         return;
+        //     }
+        //     return;
+        // }
+        // w[idx] = 0.0f;
     }
 };
 
@@ -2163,8 +2201,6 @@ void FluidSolver3D::applyPressure() {
 //        std::cout <<"\n"<< std::endl;
 //    }
 
-    float3 body_vel = body.vel;
-
     // --- Коррекция U-скоростей ---
     int u_size = (gridWidth + 1) * gridHeight * gridDepth;
     thrust::for_each(
@@ -2179,8 +2215,7 @@ void FluidSolver3D::applyPressure() {
                     gridWidth,
                     gridHeight,
                     gridDepth,
-                    vel_unknown,
-                    body_vel
+                    vel_unknown
             )
     );
 
@@ -2211,8 +2246,7 @@ void FluidSolver3D::applyPressure() {
                     gridWidth,
                     gridHeight,
                     gridDepth,
-                    vel_unknown,
-                    body_vel
+                    vel_unknown
             )
     );
 
@@ -2242,8 +2276,7 @@ void FluidSolver3D::applyPressure() {
                     gridWidth,
                     gridHeight,
                     gridDepth,
-                    vel_unknown,
-                    body_vel
+                    vel_unknown
             )
     );
 
@@ -2395,7 +2428,7 @@ struct AccumulateBodyForcesV {
 
         // сила от жидкости на тело (реактивная):  F = −m*Δu / Δt  (минус, т.к. жидкость теряет)
         // но мы здесь просто собираем m*Δu и разделим на dt уже на хосте
-        float3 Fi = make_float3(0.0f, -m * deltaV,  0.0f);
+        float3 Fi = make_float3(0.0f, - m * deltaV,  0.0f);
 
         // позиция узла в мире
         float3 X = make_float3((i+0.5f)*dx, (j)*dx, (k+0.5f)*dx);
@@ -2500,7 +2533,7 @@ void FluidSolver3D::updateBody() {
 
     // 2) Заведём аккумуляторы (на device)
     thrust::device_vector<float3> forceAcc(1, make_float3(0.0f,0.0f,0.0f));
-    thrust::device_vector<float3> torqueAcc(1, make_float3(0,0,0));
+    thrust::device_vector<float3> torqueAcc(1, make_float3(0.0f,0.0f,0.0f));
 
     float inv_dx3 = FLUID_DENSITY * dx*dx*dx;  // m_i = ρ·dx³
 
@@ -2564,57 +2597,153 @@ void FluidSolver3D::updateBody() {
     );
 
     cudaDeviceSynchronize();
+
     // 5) Скачиваем на host и интегрируем
     float3 totalF  = forceAcc[0];
     float3 totalt = torqueAcc[0];
 
+    body.force = body.mass * GRAVITY;
     // переводим из «импульса» в силу: F_solv = totalF / dt
-    body.force  = totalF  / dt;
+    body.force  = body.force + totalF  / dt;
+    applyBuoyancy();
     body.torque = totalt / dt;
 
     // 6) Интегрируем тело
     body.integrate(dt);
 
-    float3 minBound = make_float3(0.0f, 0.0f, 0.0f);
-    float3 maxBound = make_float3(gridWidth*dx, gridHeight*dx, gridDepth*dx);
-
-    float r =body.size.x / 2.0f;
-
-    if(body.pos.x - r < minBound.x){
-        body.pos.x = minBound.x + r;
-        body.vel.x = 0.0f;
-    }
-//    else{
-//        body.pos.x = maxBound.x - r;
-//        body.vel.x = 0.0f;
-//    }
-    if(body.pos.y - r < minBound.y){
-        body.pos.y = minBound.y + r;
-        body.vel.y = 0.0f;
-    }
-//    else{
-//        body.pos.y = maxBound.y - r;
-//        body.vel.y = 0.0f;
-//    }
-    if(body.pos.z - r < minBound.z){
-        body.pos.z = minBound.z + r;
-        body.vel.z = 0.0f;
-    }
-//    else{
-//        body.pos.z = maxBound.z - r;
-//        body.vel.z = 0.0f;
-//    }
-
-    body.sdf_origin = body.pos - body.size * 0.5f;
+    //handleBodyWallCollisions();
 
 }
 
+void FluidSolver3D::handleBodyWallCollisions() {
+    // 1) Проверяем совпадение dx и sdf_cell_size
+    assert(fabs(dx - body.sdf_cell_size) < 1e-6);
+
+    // 2) Радиус тела
+    float r = 0.5f * fmaxf(fmaxf(body.size.x, body.size.y), body.size.z);
+
+    // 3) Центр ячейки контейнера (в world) для SOLID‑границы
+    float half = 0.5f * dx;
+    float3 minWall = make_float3(half, half, half);
+    float3 maxWall = make_float3(gridWidth*dx - half,
+                                  gridHeight*dx - half,
+                                  gridDepth*dx - half);
+
+    // локальная функция для коррекции вдоль одной оси:
+    auto collideAxis = [&](float &p, float &v, float pMin, float pMax, float3 &pos, float3 &vel, const float3 &n) {
+        // dist to nearest wall plane
+        float distMin = p - pMin;
+        float distMax = pMax - p;
+        float dist   = fminf(distMin, distMax);
+        float penetration = r - dist;
+        if (penetration > 0.0f) {
+            // 4) Корректируем позицию: «выдавливаем» тело наружу
+            p = p + penetration * (distMin < distMax ? +1.0f : -1.0f);
+            // 5) Нормальную скорость обнуляем
+            float vn = vel *  n;
+            if (vn < 0.0f) {
+                vel = vel -  vn * n;
+            }
+        }
+    };
+
+    float3 &P = body.pos;
+    float3 &V = body.vel;
+
+    // X‑оси
+    collideAxis(P.x, V.x, minWall.x + r, maxWall.x - r,
+                body.pos, body.vel, make_float3(1,0,0));
+    // Y‑оси
+    collideAxis(P.y, V.y, minWall.y + r, maxWall.y - r,
+                body.pos, body.vel, make_float3(0,1,0));
+    // Z‑оси
+    collideAxis(P.z, V.z, minWall.z + r, maxWall.z - r,
+                body.pos, body.vel, make_float3(0,0,1));
+
+    // 6) Сдвигаем SDF‑origin
+    body.sdf_origin = body.pos - body.size * 0.5f;
+}
+
+void FluidSolver3D::applyBuoyancy() {
+    // 1) Копируем необходимые данные на хост
+    h_particles = d_particles;
+    body.sdf_data.copy_to_host();
+    
+    // 2) Находим максимальную высоту жидкости (верхний уровень)
+    float max_y = -FLT_MAX;
+    for (const auto& p : h_particles) {
+        if (p.pos.y > max_y) max_y = p.pos.y;
+    }
+    
+    // 3) Параметры SDF-сетки тела
+    int sw = body.sdf_data.width();
+    int sh = body.sdf_data.height();
+    int sd = body.sdf_data.depth();
+    float cs = body.sdf_cell_size;
+    float3 origin = body.sdf_origin;
+
+    // 4) Перебираем воксели тела, считаем погруженные
+    int submergedCount = 0;
+    for (int k = 0; k < sd; ++k) {
+        for (int j = 0; j < sh; ++j) {
+            for (int i = 0; i < sw; ++i) {
+                int sdfIdx = i + j*sw + k*sw*sh;
+                
+                // Пропускаем внешние воксели (SDF > 0)
+                if (body.sdf_data.host_data[sdfIdx] > 0.0f) 
+                    continue;
+                
+                // Мировые координаты центра вокселя
+                float3 voxel_center = origin + make_float3(
+                    (i + 0.5f) * cs,
+                    (j + 0.5f) * cs,
+                    (k + 0.5f) * cs
+                );
+                
+                // Проверяем, находится ли воксель ниже уровня жидкости
+                if (voxel_center.y < max_y) {
+                    submergedCount++;
+                }
+            }
+        }
+    }
+    if(submergedCount > 0){
+        std::cout << "\n##########\n#########\nHOORAY!!!!\n########\n######"<<std::endl;
+    }
+    //std::cout << "submergedCount = " << submergedCount << std::endl;
+    //std::cout << "max_y = " << max_y << std::endl;
+
+    // 5) Вычисляем объём вытесненной жидкости
+    float Vsub = submergedCount * cs * cs * cs;
+
+    // 6) Архимедова сила: F_arch = ρ·Vsub·(−g)
+    float3 F_arch = -FLUID_DENSITY * Vsub * GRAVITY;
+
+    // 7) Прибавляем к накопленной силе тела
+    body.force = body.force + F_arch;
+    
+    // 8) Для отладки: сохраняем погруженные воксели
+    // std::vector<float3> submergedVoxels;
+    // for (int k = 0; k < sd; ++k) {
+    //     for (int j = 0; j < sh; ++j) {
+    //         for (int i = 0; i < sw; ++i) {
+    //             int sdfIdx = i + j*sw + k*sw*sh;
+    //             if (body.sdf_data.host_data[sdfIdx] > 0.0f) continue;
+    //             float3 c = origin + make_float3((i+0.5f)*cs, (j+0.5f)*cs, (k+0.5f)*cs);
+    //             if (c.y < max_y) {
+    //                 submergedVoxels.push_back(c);
+    //             }
+    //         }
+    //     }
+    // }
+    // Utility::savePointsToPLY(submergedVoxels, "OutputData/submerged.ply");
+}
 
 //##############################
 // general loop funcs##########
 __host__ void FluidSolver3D::frameStep(){
     labelGrid();
-
+    updateBody();
     //particles velocities to grid
     particlesToGrid();
 
@@ -2625,13 +2754,13 @@ __host__ void FluidSolver3D::frameStep(){
     applyForces();
     pressureSolve();
     applyPressure();
-
+    
     //grid velocities to particles
     gridToParticles(PIC_WEIGHT);
 
     advectParticles(0.1);
 
-    updateBody();
+    
     //computeBodyForces();
 
 
@@ -2665,6 +2794,8 @@ __host__ void FluidSolver3D::run(int max_steps) {
             // Генерируем и сохраняем поверхность тела
             body.generateSurfacePoints(0.5f * dx);  // Плотность точек
             body.exportToPLY("OutputData/body_" + std::to_string(i/iterPerFrame) + ".ply");
+
+            saveLabelsToPLY("OutputData/labels_" + std::to_string(i/iterPerFrame) + ".ply");
         }
 
     }
@@ -2710,4 +2841,77 @@ float FluidSolver3D::interpolatePressure(const float3& pos) {
 }
 
 
-
+void FluidSolver3D::saveLabelsToPLY(const std::string& filename) {
+    // Копируем метки с устройства на хост
+    thrust::host_vector<int> labels_h = labels.device_data;
+    
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Cannot open file: " << filename << std::endl;
+        return;
+    }
+    
+    // Считаем количество не-AIR ячеек
+    size_t count = 0;
+    for (int k = 0; k < gridDepth; k++) {
+        for (int j = 0; j < gridHeight; j++) {
+            for (int i = 0; i < gridWidth; i++) {
+                int idx = i + j * gridWidth + k * gridWidth * gridHeight;
+                if (labels_h[idx] != Utility::AIR) count++;
+            }
+        }
+    }
+    
+    // Записываем заголовок PLY
+    file << "ply\n";
+    file << "format ascii 1.0\n";
+    file << "element vertex " << count << "\n";
+    file << "property float x\n";
+    file << "property float y\n";
+    file << "property float z\n";
+    file << "property uchar red\n";
+    file << "property uchar green\n";
+    file << "property uchar blue\n";
+    file << "end_header\n";
+    
+    // Записываем данные
+    for (int k = 0; k < gridDepth; k++) {
+        for (int j = 0; j < gridHeight; j++) {
+            for (int i = 0; i < gridWidth; i++) {
+                int idx = i + j * gridWidth + k * gridWidth * gridHeight;
+                int label = labels_h[idx];
+                
+                if (label == Utility::AIR) continue;
+                
+                // Центр ячейки
+                float x = (i + 0.5f) * dx;
+                float y = (j + 0.5f) * dx;
+                float z = (k + 0.5f) * dx;
+                
+                // Цвет в зависимости от типа ячейки
+                unsigned char r = 0, g = 0, b = 0;
+                switch (label) {
+                    case Utility::FLUID: 
+                        r = 0; g = 0; b = 255;  // Синий
+                        break;
+                    case Utility::SOLID: 
+                        r = 128; g = 128; b = 128;  // Серый
+                        break;
+                    case Utility::BODY: 
+                        r = 255; g = 0; b = 0;  // Красный
+                        break;
+                    default: 
+                        r = 255; g = 255; b = 255;  // Белый (не должно быть)
+                }
+                
+                file << x << " " << y << " " << z << " "
+                     << static_cast<int>(r) << " "
+                     << static_cast<int>(g) << " "
+                     << static_cast<int>(b) << "\n";
+            }
+        }
+    }
+    
+    file.close();
+    std::cout << "Saved labels to: " << filename << std::endl;
+}

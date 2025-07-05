@@ -197,6 +197,7 @@ namespace Utility {
 
         // SDF данные
         Grid3D<float> sdf_data;
+        float3 fileOrigin; //локальные координаты начала для sdf
         float3 sdf_origin;      // Минимальный угол сетки SDF (мировые координаты)
         float sdf_cell_size; // Размер ячейки SDF
 
@@ -228,7 +229,6 @@ namespace Utility {
             // 2. Читаем начало координат SDF
             std::getline(file, line);
             std::istringstream origin_line(line);
-            float3 fileOrigin;
             origin_line >> fileOrigin.x >> fileOrigin.y >> fileOrigin.z;
             std::cout << "Original SDF origin: ("
                       << fileOrigin.x << ", "
@@ -372,6 +372,7 @@ namespace Utility {
 
     __device__ float3 cross(const float3& a, const float3& b);
 
+    __device__ float sampleBody(float3 bodyVel, float3 bodyOmega, float3 bodyCM, float3 facePos, float3 normal); //получить нормальную скорость тела на данной грани
 
 }
 
