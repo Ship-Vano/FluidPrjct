@@ -361,8 +361,8 @@ namespace Utility {
             // 3) Сдвигаем SDF‑origin вместе с pos, чтобы “коробка” SDF двигалась
             //    так, чтобы её центр снова совпадал с pos
             sdf_origin = pos - size * 0.5f;
-            std::cout << "sdf_origin = " << sdf_origin.x << ", " << sdf_origin.y << ", " << sdf_origin.z << std::endl;
-            std::cout << "body.pos = " << pos.x << ", " << pos.y << ", " << pos.z << std::endl;
+            //std::cout << "sdf_origin = " << sdf_origin.x << ", " << sdf_origin.y << ", " << sdf_origin.z << std::endl;
+            //std::cout << "body.pos = " << pos.x << ", " << pos.y << ", " << pos.z << std::endl;
             // 4) Сбросим накопленные F и τ, чтобы начать новый кадр
             clearAccumulators();
         }

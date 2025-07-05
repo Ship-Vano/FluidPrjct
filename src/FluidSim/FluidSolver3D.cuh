@@ -148,6 +148,8 @@ public:
     int iterPerFrame = 10; // iterations to generate one frame (file out each iterPerFrame steps)
     FileOutputFormat outputFormat = PLY;
     std::string outputTemplate = "InputData/particles_";
+    float3 initialBodyPos;
+    float bodyMass;
     /*
 	Creates a new 2D fluid solver.
 	Args:

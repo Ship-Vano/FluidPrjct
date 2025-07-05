@@ -123,11 +123,11 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
     Utility::save3dParticlesToPLY(h_particles, "InputData/particles_-1.ply");
 
     // Инициализация тела
-    float3 initial_position = make_float3(1.75f, 2.1f, 1.75f);  // Желаемая начальная позиция
-    body.loadSDF("InputData/ball.sdf", initial_position);
+    //float3 initial_position = make_float3(1.75f, 2.1f, 1.75f);  // Желаемая начальная позиция
+    body.loadSDF("InputData/ball.sdf", initialBodyPos);
 
     // Физические свойства
-    body.mass = 200.0f;  // Масса в кг
+    body.mass = bodyMass;
     body.vel = make_float3(0.0f, 0.0f, 0.0f);
     body.force = make_float3(0.0f, 0.0f, 0.0f);
 
@@ -2707,9 +2707,9 @@ void FluidSolver3D::applyBuoyancy() {
             }
         }
     }
-    if(submergedCount > 0){
-        std::cout << "\n##########\n#########\nHOORAY!!!!\n########\n######"<<std::endl;
-    }
+//    if(submergedCount > 0){
+//        std::cout << "\n##########\n#########\nHOORAY!!!!\n########\n######"<<std::endl;
+//    }
     //std::cout << "submergedCount = " << submergedCount << std::endl;
     //std::cout << "max_y = " << max_y << std::endl;
 
