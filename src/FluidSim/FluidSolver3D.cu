@@ -2662,6 +2662,98 @@ struct AccumulateBodyForcesW {
     }
 };
 
+struct PressureForceCalculator {
+    int W, H, D;
+    float dx;
+    float3 cm;             // центр масс тела
+    const int* labels;     // метки ячеек (W×H×D)
+    const float* pressure; // давление в ячейках
+    float3* forceAcc;      // аккумулятор силы
+    float3* torqueAcc;     // аккумулятор момента
+
+    __device__
+    void operator()(int idx) const {
+        // Преобразуем линейный индекс в 3D координаты
+        int i = idx % W;
+        int j = (idx / W) % H;
+        int k = idx / (W * H);
+
+        // Работаем только с ячейками тела
+        if (labels[idx] != Utility::BODY) return;
+
+        // Площадь грани
+        float area = dx * dx;
+
+        // Смещения для соседей (право, лево, верх, низ, перед, зад)
+        int di[6] = {1, -1, 0, 0, 0, 0};
+        int dj[6] = {0, 0, 1, -1, 0, 0};
+        int dk[6] = {0, 0, 0, 0, 1, -1};
+
+        // Нормали для каждой грани
+        float3 normals[6] = {
+                {1.0f, 0.0f, 0.0f},  // right
+                {-1.0f, 0.0f, 0.0f}, // left
+                {0.0f, 1.0f, 0.0f},  // top
+                {0.0f, -1.0f, 0.0f}, // bottom
+                {0.0f, 0.0f, 1.0f},  // front
+                {0.0f, 0.0f, -1.0f}  // back
+        };
+
+        // Центры граней относительно центра ячейки
+        float3 face_offsets[6] = {
+                {0.5f, 0.0f, 0.0f},  // right
+                {-0.5f, 0.0f, 0.0f}, // left
+                {0.0f, 0.5f, 0.0f},  // top
+                {0.0f, -0.5f, 0.0f}, // bottom
+                {0.0f, 0.0f, 0.5f},  // front
+                {0.0f, 0.0f, -0.5f}  // back
+        };
+
+        for (int dir = 0; dir < 6; dir++) {
+            int ni = i + di[dir];
+            int nj = j + dj[dir];
+            int nk = k + dk[dir];
+
+            // Пропускаем, если сосед выходит за границы
+            if (ni < 0 || ni >= W || nj < 0 || nj >= H || nk < 0 || nk >= D)
+                continue;
+
+            int nidx = ni + nj * W + nk * W * H;
+
+            // Работаем только с границами тело-жидкость
+            if (labels[nidx] != Utility::FLUID)
+                continue;
+
+            // Вычисляем центр грани в мировых координатах
+            float3 cell_center = make_float3(
+                    (i + 0.5f) * dx,
+                    (j + 0.5f) * dx,
+                    (k + 0.5f) * dx
+            );
+
+            float3 face_center = cell_center + face_offsets[dir] * dx;
+
+            // Вектор от центра масс к центру грани
+            float3 r = face_center - cm;
+
+            // Сила давления (F = -p * A * n)
+            float p = pressure[nidx];
+            float3 F = normals[dir] * (-p * area);
+
+            // Момент (τ = r × F)
+            float3 torque = Utility::cross(r, F);
+
+            // Атомарное добавление
+            atomicAdd(&forceAcc->x, F.x);
+            atomicAdd(&forceAcc->y, F.y);
+            atomicAdd(&forceAcc->z, F.z);
+
+            atomicAdd(&torqueAcc->x, torque.x);
+            atomicAdd(&torqueAcc->y, torque.y);
+            atomicAdd(&torqueAcc->z, torque.z);
+        }
+    }
+};
 void FluidSolver3D::updateBody() {
     int Usize = (gridWidth+1)*gridHeight*gridDepth;
     int Vsize = gridWidth*(gridHeight+1)*gridDepth;
@@ -2679,62 +2771,78 @@ void FluidSolver3D::updateBody() {
 
     //float inv_dx3 = FLUID_DENSITY * dx*dx*dx;  // m_i = ρ·dx³
 
-    // 3) Параллельно проходим по U‑узлам
-    thrust::for_each_n(
-            thrust::device,
-            thrust::make_counting_iterator<int>(0),
-            Usize,
-            AccumulateBodyForcesU{
-                    gridWidth, gridHeight, gridDepth,
-                    dx, dt, FLUID_DENSITY,
-                    body.pos,
-//                    body.vel,
-//                    body.omega,
-                    thrust::raw_pointer_cast(labels.device_data.data()),
-                    thrust::raw_pointer_cast(uStar.data()),
-                    thrust::raw_pointer_cast(u.device_data.data()),
-                    thrust::raw_pointer_cast(forceAcc.data()),
-                    thrust::raw_pointer_cast(torqueAcc.data())
-            }
-    );
+//    // 3) Параллельно проходим по U‑узлам
+//    thrust::for_each_n(
+//            thrust::device,
+//            thrust::make_counting_iterator<int>(0),
+//            Usize,
+//            AccumulateBodyForcesU{
+//                    gridWidth, gridHeight, gridDepth,
+//                    dx, dt, FLUID_DENSITY,
+//                    body.pos,
+////                    body.vel,
+////                    body.omega,
+//                    thrust::raw_pointer_cast(labels.device_data.data()),
+//                    thrust::raw_pointer_cast(uStar.data()),
+//                    thrust::raw_pointer_cast(u.device_data.data()),
+//                    thrust::raw_pointer_cast(forceAcc.data()),
+//                    thrust::raw_pointer_cast(torqueAcc.data())
+//            }
+//    );
+//
+//    cudaDeviceSynchronize();
+//
+//    thrust::for_each_n(
+//            thrust::device,
+//            thrust::make_counting_iterator<int>(0),
+//            Vsize,
+//            AccumulateBodyForcesV{
+//                    gridWidth, gridHeight, gridDepth,
+//                    dx, dt, FLUID_DENSITY,
+//                    body.pos,
+//                    thrust::raw_pointer_cast(labels.device_data.data()),
+//                    thrust::raw_pointer_cast(vStar.data()),
+//                    thrust::raw_pointer_cast(v.device_data.data()),
+//                    thrust::raw_pointer_cast(forceAcc.data()),
+//                    thrust::raw_pointer_cast(torqueAcc.data())
+//            }
+//    );
+//
+//    cudaDeviceSynchronize();
+//
+//    thrust::for_each_n(
+//            thrust::device,
+//            thrust::make_counting_iterator<int>(0),
+//            Wsize,
+//            AccumulateBodyForcesW{
+//                    gridWidth, gridHeight, gridDepth,
+//                    dx, dt, FLUID_DENSITY,
+//                    body.pos,
+////                    body.vel,
+////                    body.omega,
+//                    thrust::raw_pointer_cast(labels.device_data.data()),
+//                    thrust::raw_pointer_cast(wStar.data()),
+//                    thrust::raw_pointer_cast(w.device_data.data()),
+//                    thrust::raw_pointer_cast(forceAcc.data()),
+//                    thrust::raw_pointer_cast(torqueAcc.data())
+//            }
+//    );
 
-    cudaDeviceSynchronize();
+    // Создание функтора
+        PressureForceCalculator calculator = {
+                gridWidth, gridHeight, gridDepth, dx,
+                body.pos,
+                labels.device_ptr(), p.device_ptr(),
+                thrust::raw_pointer_cast(forceAcc.data()),
+                thrust::raw_pointer_cast( torqueAcc.data())
+        };
 
-    thrust::for_each_n(
-            thrust::device,
-            thrust::make_counting_iterator<int>(0),
-            Vsize,
-            AccumulateBodyForcesV{
-                    gridWidth, gridHeight, gridDepth,
-                    dx, dt, FLUID_DENSITY,
-                    body.pos,
-                    thrust::raw_pointer_cast(labels.device_data.data()),
-                    thrust::raw_pointer_cast(vStar.data()),
-                    thrust::raw_pointer_cast(v.device_data.data()),
-                    thrust::raw_pointer_cast(forceAcc.data()),
-                    thrust::raw_pointer_cast(torqueAcc.data())
-            }
-    );
-
-    cudaDeviceSynchronize();
-
-    thrust::for_each_n(
-            thrust::device,
-            thrust::make_counting_iterator<int>(0),
-            Wsize,
-            AccumulateBodyForcesW{
-                    gridWidth, gridHeight, gridDepth,
-                    dx, dt, FLUID_DENSITY,
-                    body.pos,
-//                    body.vel,
-//                    body.omega,
-                    thrust::raw_pointer_cast(labels.device_data.data()),
-                    thrust::raw_pointer_cast(wStar.data()),
-                    thrust::raw_pointer_cast(w.device_data.data()),
-                    thrust::raw_pointer_cast(forceAcc.data()),
-                    thrust::raw_pointer_cast(torqueAcc.data())
-            }
-    );
+    // Запуск для всех ячеек
+        thrust::for_each(
+                thrust::make_counting_iterator(0),
+                thrust::make_counting_iterator(w_x_h_x_d),
+                calculator
+        );
 
     cudaDeviceSynchronize();
 
@@ -2743,9 +2851,12 @@ void FluidSolver3D::updateBody() {
     float3 totalt = torqueAcc[0];
 
     body.force = body.mass * GRAVITY;
-    body.force  = body.force + 0.001*totalF;
-    body.torque = body.torque + 0.001*totalt;
+    //body.force  = body.force + totalF;
+    //body.torque = body.torque + totalt;
     applyBuoyancy();
+
+     std::cout << " Force: " << body.force.x << ", " << body.force.y << ", " << body.force.z
+              << std::endl;
 
     // 6) Интегрируем тело
     body.integrate(dt);
@@ -2910,11 +3021,11 @@ void FluidSolver3D::applyBuoyancy() {
     body.force = body.force + F_arch - damping * body.vel * body.mass;
 
     // Отладочная информация
-    std::cout << "Submerged volume: " << submergedVolume
-              << " / " << totalVolume
-              << " (" << (submergedVolume/totalVolume)*100 << "%)"
-              << " Force: " << F_arch.x << ", " << F_arch.y << ", " << F_arch.z
-              << std::endl;
+//    std::cout << "Submerged volume: " << submergedVolume
+//              << " / " << totalVolume
+//              << " (" << (submergedVolume/totalVolume)*100 << "%)"
+//              << " Force: " << F_arch.x << ", " << F_arch.y << ", " << F_arch.z
+//              << std::endl;
 }
 
 //##############################
@@ -2945,8 +3056,8 @@ __host__ void FluidSolver3D::frameStep(){
 }
 
 __host__ void FluidSolver3D::run(int max_steps) {
-    csv_file.open("OutputData/csvRes.csv");
-    csv_file << "frame,centerX1,centerX2,centerX3,angleX1,angleX2,angleX3\n";
+//    csv_file.open("OutputData/csvRes.csv");
+//    csv_file << "frame,centerX1,centerX2,centerX3,angleX1,angleX2,angleX3\n";
     d_particles = h_particles;
     // Prepare
     cudaEvent_t start, stop;
@@ -2975,19 +3086,19 @@ __host__ void FluidSolver3D::run(int max_steps) {
             body.generateSurfacePoints(0.5*dx);  // Плотность точек
             body.exportToPLY("OutputData/body_" + std::to_string(i/iterPerFrame) + ".ply");
 
-            saveLabelsToPLY("OutputData/labels_" + std::to_string(i/iterPerFrame) + ".ply");
-
-            float3 angles = Utility::quaternion_to_ship_angles(body.orientation);
-             csv_file << i/iterPerFrame << ","
-                 << body.pos.x << ","
-                  << body.pos.y << ","
-                  << body.pos.z << ","
-                  << angles.x << ","   // Крен (roll)
-                  << angles.y << ","   // Тангаж (pitch)
-                 << angles.z << "\n"; // Рыскание (yaw)   // << std::setprecision(precision)
-
-            // Обеспечиваем немедленную запись на диск
-            csv_file.flush();
+//            saveLabelsToPLY("OutputData/labels_" + std::to_string(i/iterPerFrame) + ".ply");
+//
+//            float3 angles = Utility::quaternion_to_ship_angles(body.orientation);
+//             csv_file << i/iterPerFrame << ","
+//                 << body.pos.x << ","
+//                  << body.pos.y << ","
+//                  << body.pos.z << ","
+//                  << angles.x << ","   // Крен (roll)
+//                  << angles.y << ","   // Тангаж (pitch)
+//                 << angles.z << "\n"; // Рыскание (yaw)   // << std::setprecision(precision)
+//
+//            // Обеспечиваем немедленную запись на диск
+//            csv_file.flush();
         }
 
     }

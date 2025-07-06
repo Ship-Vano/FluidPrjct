@@ -8,7 +8,7 @@
   "frameAmount": 200,
   "outputTemplate": "OutputData/particles_",
   "body_x": 0.5,
-  "body_y": 0.2,
+  "body_y": 0.3,
   "body_z": 0.5,
-  "body_mass": 0.2
+  "body_mass": 0.1
 }
