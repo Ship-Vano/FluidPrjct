@@ -5,10 +5,10 @@
   "iterPerFrame": 1,
   "outputFormat": "PLY",
   "inputLabelData": "InputData/labels_gaussian.txt",
-  "frameAmount": 200,
+  "frameAmount": 98,
   "outputTemplate": "OutputData/particles_",
-  "body_x": 0.5,
-  "body_y": 0.3,
-  "body_z": 0.5,
+  "body_x": 0.3,
+  "body_y": 0.2,
+  "body_z": 0.3,
   "body_mass": 0.1
 }
