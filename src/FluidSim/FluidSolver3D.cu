@@ -3037,27 +3037,72 @@ void FluidSolver3D::applyBuoyancy() {
 //##############################
 // general loop funcs##########
 __host__ void FluidSolver3D::frameStep(){
-    labelGrid();
-    updateBody();
+    float time;
+    cudaEvent_t startFstep, stopFstep;
+    cudaEventCreate(&startFstep);
+    cudaEventCreate(&stopFstep);
+
+    cudaEventRecord(startFstep, 0);
+    updateBody();//////////////////////////////////
+    cudaEventRecord(stopFstep, 0);
+    cudaEventSynchronize(stopFstep);
+    cudaEventElapsedTime(&time, startFstep, stopFstep);
+    updbdTime += time;
+
+    cudaEventRecord(startFstep, 0);
+    labelGrid();///////////////////////////////////
+    cudaEventRecord(stopFstep, 0);
+    cudaEventSynchronize(stopFstep);
+    cudaEventElapsedTime(&time, startFstep, stopFstep);
+    labelTime += time;
+
     //particles velocities to grid
+    cudaEventRecord(startFstep, 0);
     particlesToGrid();
+    cudaEventRecord(stopFstep, 0);
+    cudaEventSynchronize(stopFstep);
+    cudaEventElapsedTime(&time, startFstep, stopFstep);
+    p2gTime += time;
 
     //saving a copy of the current grid velocities (for FLIP)
     saveVelocities();
 
     //applying body forces on grid (e.g. gravity force)
+    cudaEventRecord(startFstep, 0);
     applyForces();
+    cudaEventRecord(stopFstep, 0);
+    cudaEventSynchronize(stopFstep);
+    cudaEventElapsedTime(&time, startFstep, stopFstep);
+    aplfrcTime += time;
+
+    cudaEventRecord(startFstep, 0);
     pressureSolve();
+    cudaEventRecord(stopFstep, 0);
+    cudaEventSynchronize(stopFstep);
+    cudaEventElapsedTime(&time, startFstep, stopFstep);
+    prsslvTime += time;
+
+    cudaEventRecord(startFstep, 0);
     applyPressure();
+    cudaEventRecord(stopFstep, 0);
+    cudaEventSynchronize(stopFstep);
+    cudaEventElapsedTime(&time, startFstep, stopFstep);
+    applprsTime += time;
     
     //grid velocities to particles
+    cudaEventRecord(startFstep, 0);
     gridToParticles(PIC_WEIGHT);
+    cudaEventRecord(stopFstep, 0);
+    cudaEventSynchronize(stopFstep);
+    cudaEventElapsedTime(&time, startFstep, stopFstep);
+    g2pTime += time;
 
+    cudaEventRecord(startFstep, 0);
     advectParticles(0.1);
-
-    
-    //computeBodyForces();
-
+    cudaEventRecord(stopFstep, 0);
+    cudaEventSynchronize(stopFstep);
+    cudaEventElapsedTime(&time, startFstep, stopFstep);
+    advctTime += time;
 
 }
 
@@ -3071,6 +3116,7 @@ __host__ void FluidSolver3D::run(int max_steps) {
     cudaEventCreate(&stop);
     // Start record
     cudaEventRecord(start, 0);
+    labelGrid();
     for(int i = 0; i <= max_steps*iterPerFrame; ++i){
         frameStep();
         if(i%iterPerFrame == 0){
@@ -3085,12 +3131,13 @@ __host__ void FluidSolver3D::run(int max_steps) {
                 default:
                     Utility::save3dParticlesToPLY(h_particles, outputTemplate + std::to_string(i/iterPerFrame ) + ".ply");
             }
-            std::cout << "frame = " << i / iterPerFrame   << "; numParticles = " << h_particles.size()<<std::endl;
+            //std::cout << "frame = " << i / iterPerFrame   << "; numParticles = " << h_particles.size()<<std::endl;
 
 
             // Генерируем и сохраняем поверхность тела
             body.generateSurfacePoints(0.5*dx);  // Плотность точек
-            body.exportToPLY("OutputData/body_" + std::to_string(i/iterPerFrame) + ".ply");
+            if(activeBody)
+                body.exportToPLY("OutputData/body_" + std::to_string(i/iterPerFrame) + ".ply");
 
 //            saveLabelsToPLY("OutputData/labels_" + std::to_string(i/iterPerFrame) + ".ply");
 //
@@ -3112,7 +3159,17 @@ __host__ void FluidSolver3D::run(int max_steps) {
     cudaEventSynchronize(stop);
     float elapsedTime;
     cudaEventElapsedTime(&elapsedTime, start, stop); // that's our time!
+    std::cout << "total  frames = " << max_steps*iterPerFrame << std::endl;
     std::cout << "elapsed time = " << elapsedTime / 1000.0f << std::endl;
+    std::cout << "labelTime = " << labelTime / 1000.0f << std::endl;
+    std::cout << "p2gTime = " << p2gTime / 1000.0f << std::endl;
+    std::cout << "aplfrcTime = " << aplfrcTime/ 1000.0f << std::endl;
+    std::cout << "prsslvTime = " << prsslvTime / 1000.0f << std::endl;
+    std::cout << "applprsTime = " << applprsTime / 1000.0f << std::endl;
+    std::cout << "g2pTime = " << g2pTime / 1000.0f << std::endl;
+    std::cout << "updbdTime = " << updbdTime / 1000.0f << std::endl;
+    std::cout << "advctTime = " << advctTime / 1000.0f << std::endl;
+    std::cout << "fps = " <<   (max_steps) / (elapsedTime / 1000.0f) << std::endl;
 }
 
 

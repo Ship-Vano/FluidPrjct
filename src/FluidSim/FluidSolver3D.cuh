@@ -106,7 +106,17 @@ private:
 
     //RIGID BODY (DUCK)
     Utility::RigidBody body;
-     std::ofstream csv_file;
+    std::ofstream csv_file;
+
+    // timers
+    float labelTime = 0.0f;
+    float p2gTime = 0.0f;
+    float aplfrcTime = 0.0f;
+    float prsslvTime = 0.0f;
+    float applprsTime = 0.0f;
+    float g2pTime = 0.0f;
+    float updbdTime = 0.0f;
+    float advctTime = 0.0f;
 
     // FUNCTIONS
     // solver steps
@@ -141,6 +151,7 @@ private:
     void computeBodyForces();
     void handleBodyWallCollisions();
     void applyBuoyancy();
+
 
 
 

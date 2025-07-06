@@ -388,8 +388,8 @@ namespace Utility {
         void integrate(float dt) {
             // 1) Линейная динамика (semi-implicit Euler):
             float3 accel = force / mass;      // a = F/M
-            vel = make_float3(1.0f,0.0f,1.0f);
-            //vel = vel + accel * dt;                // v^{n+1} = v^n + a*dt
+            //vel = make_float3(1.0f,0.0f,1.0f);
+            vel = vel + accel * dt;                // v^{n+1} = v^n + a*dt
             pos = pos + vel * dt;                  // x^{n+1} = x^n + v^{n+1}*dt
 
             // 2) Угловая динамика
