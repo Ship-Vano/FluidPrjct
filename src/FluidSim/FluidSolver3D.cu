@@ -153,40 +153,42 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
 
 
     // Инициализация тела
-    //float3 initial_position = make_float3(1.75f, 2.1f, 1.75f);  // Желаемая начальная позиция
-    body.loadSDF("InputData/ball.sdf", initialBodyPos);
+    if(activeBody){
+        //float3 initial_position = make_float3(1.75f, 2.1f, 1.75f);  // Желаемая начальная позиция
+        body.loadSDF("InputData/ball.sdf", initialBodyPos);
 
-    // Физические свойства
-    body.mass = bodyMass;
-    body.vel = make_float3(0.0f, 0.0f, 0.0f);
-    body.force = make_float3(0.0f, 0.0f, 0.0f);
+        // Физические свойства
+        body.mass = bodyMass;
+        body.vel = make_float3(0.0f, 0.0f, 0.0f);
+        body.force = make_float3(0.0f, 0.0f, 0.0f);
 
-    // Момент инерции (для сферы)
-    float radius = body.size.x / 2.0f;  // Предполагаем сферическое тело
-    body.inertia = 0.4f * body.mass * radius * radius;
-    body.inv_inertia = 1.0f / body.inertia;
-    body.omega = make_float3(0.0f, 0.0f, 0.0f); //угловая скорость
-    body.torque = make_float3(0.0f,0.0f,0.0f);      // суммарный момент
+        // Момент инерции (для сферы)
+        float radius = body.size.x / 2.0f;  // Предполагаем сферическое тело
+        body.inertia = 0.4f * body.mass * radius * radius;
+        body.inv_inertia = 1.0f / body.inertia;
+        body.omega = make_float3(0.0f, 0.0f, 0.0f); //угловая скорость
+        body.torque = make_float3(0.0f,0.0f,0.0f);      // суммарный момент
 
-    thrust::for_each_n(
-            thrust::device,
-            thrust::make_counting_iterator(0),
-            gridWidth* gridHeight * gridDepth,
-            MarkBodyCellsFunctor {
-                    body.sdf_data.device_ptr(),
-                    body.sdf_origin,
-                    body.sdf_cell_size,
-                    body.sdf_data.width(),
-                    body.sdf_data.height(),
-                    body.sdf_data.depth(),
-                    labels.device_ptr(),
-                    gridWidth,
-                    gridHeight,
-                    dx,body.pos,  thrust::raw_pointer_cast(body.rotation_matrix_d.data())
-            }
-    );
-    cudaDeviceSynchronize();
-    labels.host_data = labels.device_data;
+        thrust::for_each_n(
+                thrust::device,
+                thrust::make_counting_iterator(0),
+                gridWidth* gridHeight * gridDepth,
+                MarkBodyCellsFunctor {
+                        body.sdf_data.device_ptr(),
+                        body.sdf_origin,
+                        body.sdf_cell_size,
+                        body.sdf_data.width(),
+                        body.sdf_data.height(),
+                        body.sdf_data.depth(),
+                        labels.device_ptr(),
+                        gridWidth,
+                        gridHeight,
+                        dx,body.pos,  thrust::raw_pointer_cast(body.rotation_matrix_d.data())
+                }
+        );
+        cudaDeviceSynchronize();
+        labels.host_data = labels.device_data;
+    }
 
     // Инициализация частиц
     seedParticles(PARTICLES_PER_CELL);
@@ -342,23 +344,25 @@ __host__ int FluidSolver3D::labelGrid() {
             ClearNonSolidFunctor()
     );
 
-     thrust::for_each_n(
-            thrust::device,
-            thrust::make_counting_iterator(0),
-            gridWidth* gridHeight * gridDepth,
-            MarkBodyCellsFunctor {
-                    body.sdf_data.device_ptr(),
-                    body.sdf_origin,
-                    body.sdf_cell_size,
-                    body.sdf_data.width(),
-                    body.sdf_data.height(),
-                    body.sdf_data.depth(),
-                    labels.device_ptr(),
-                    gridWidth,
-                    gridHeight,
-                    dx, body.pos,  thrust::raw_pointer_cast(body.rotation_matrix_d.data())
-            }
-    );
+    if(activeBody){
+         thrust::for_each_n(
+                thrust::device,
+                thrust::make_counting_iterator(0),
+                gridWidth* gridHeight * gridDepth,
+                MarkBodyCellsFunctor {
+                        body.sdf_data.device_ptr(),
+                        body.sdf_origin,
+                        body.sdf_cell_size,
+                        body.sdf_data.width(),
+                        body.sdf_data.height(),
+                        body.sdf_data.depth(),
+                        labels.device_ptr(),
+                        gridWidth,
+                        gridHeight,
+                        dx, body.pos,  thrust::raw_pointer_cast(body.rotation_matrix_d.data())
+                }
+        );
+    }
 
     // 2) Пометка FLUID-ячееk по текущим частицам
     int numParticles = static_cast<int>(d_particles.size());
@@ -2755,6 +2759,8 @@ struct PressureForceCalculator {
     }
 };
 void FluidSolver3D::updateBody() {
+    if(!activeBody) return;
+
     int Usize = (gridWidth+1)*gridHeight*gridDepth;
     int Vsize = gridWidth*(gridHeight+1)*gridDepth;
     int Wsize = gridWidth*gridHeight*(gridDepth+1);

@@ -1,14 +1,15 @@
 {
   "dt": 0.005,
   "dx": 0.02,
-  "PIC_WEIGHT": 0.01,
+  "PIC_WEIGHT": 0.005,
   "iterPerFrame": 1,
   "outputFormat": "PLY",
-  "inputLabelData": "InputData/labels_gaussian.txt",
+  "inputLabelData": "InputData/labels_3d_sphere.txt",
   "frameAmount": 98,
   "outputTemplate": "OutputData/particles_",
   "body_x": 0.3,
   "body_y": 0.2,
   "body_z": 0.3,
-  "body_mass": 0.1
+  "body_mass": 0.1,
+  "activeBody": false
 }

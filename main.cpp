@@ -40,13 +40,18 @@ int main(){
     std::cout << "alpha = " << solver.PIC_WEIGHT << std::endl;
 
     // body setup
-    float body_x = json_root.get("body_x", 0.5).asFloat();
-    float body_y = json_root.get("body_y", 0.5).asFloat();
-    float body_z = json_root.get("body_z", 0.5).asFloat();
-    float3 body_pos = make_float3(body_x,body_y,body_z);
-    float body_mass = json_root.get("body_mass", 50.0f).asFloat();
-    solver.initialBodyPos = body_pos;
-    solver.bodyMass = body_mass;
+    bool activeBody = json_root.get("activeBody", false).asBool();
+    solver.activeBody = activeBody;
+    if(activeBody){
+        float body_x = json_root.get("body_x", 0.5).asFloat();
+        float body_y = json_root.get("body_y", 0.5).asFloat();
+        float body_z = json_root.get("body_z", 0.5).asFloat();
+        float3 body_pos = make_float3(body_x,body_y,body_z);
+        float body_mass = json_root.get("body_mass", 50.0f).asFloat();
+        solver.initialBodyPos = body_pos;
+        solver.bodyMass = body_mass;
+    }
+
 
     solver.init(inputLabelData);
     solver.run(frameAmount);
