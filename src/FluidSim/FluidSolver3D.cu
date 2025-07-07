@@ -52,13 +52,14 @@ struct MarkBodyCellsFunctor {
     float dx;
     float3 body_pos;
     float* rotation_matrix;
+    float3 local_com;
 
     __host__ __device__
     MarkBodyCellsFunctor(float* sdf_data_, float3 sdf_orig, float sdf_cell_size_, int sdf_w_, int sdf_h_, int sdf_d_,
-                         int* labels, int width, int height, float cell_size, float3 body_pos_, float* rotation_matrix_)
+                         int* labels, int width, int height, float cell_size, float3 body_pos_, float* rotation_matrix_, float3 local_com_)
             : labels_ptr(labels), W(width), H(height), dx(cell_size),
               sdf_data(sdf_data_), sdf_origin(sdf_orig), sdf_cell_size(sdf_cell_size_),
-              sdf_w(sdf_w_), sdf_h(sdf_h_), sdf_d(sdf_d_), body_pos(body_pos_), rotation_matrix(rotation_matrix_){}
+              sdf_w(sdf_w_), sdf_h(sdf_h_), sdf_d(sdf_d_), body_pos(body_pos_), rotation_matrix(rotation_matrix_), local_com(local_com_){}
 
     __device__
     void operator()(int idx) const {
@@ -70,7 +71,7 @@ struct MarkBodyCellsFunctor {
                 (i+0.5f)*dx, (j+0.5f)*dx, (k+0.5f)*dx
         );
 
-        if (Utility::contains(sdf_data, sdf_origin, body_pos, rotation_matrix, cell_center, sdf_cell_size, sdf_w, sdf_h, sdf_d) && labels_ptr[idx] != Utility::SOLID) {
+        if (Utility::contains(sdf_data, sdf_origin, body_pos, local_com, rotation_matrix, cell_center, sdf_cell_size, sdf_w, sdf_h, sdf_d) && labels_ptr[idx] != Utility::SOLID) {
             labels_ptr[idx] = Utility::BODY;
         }
     }
@@ -168,14 +169,17 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
         body.inv_inertia = 1.0f / body.inertia;
         body.omega = make_float3(0.0f, 0.0f, 0.0f); //угловая скорость
         body.torque = make_float3(0.0f,0.0f,0.0f);      // суммарный момент
-
+        body.theta = 0.0f;
+        body.psi = 0.0f;
+        body.phi = 0.0f;
+        body.update_rotation_matrix();
         thrust::for_each_n(
                 thrust::device,
                 thrust::make_counting_iterator(0),
                 gridWidth* gridHeight * gridDepth,
                 MarkBodyCellsFunctor {
                         body.sdf_data.device_ptr(),
-                        body.sdf_origin,
+                        body.fileOrigin,
                         body.sdf_cell_size,
                         body.sdf_data.width(),
                         body.sdf_data.height(),
@@ -183,7 +187,7 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
                         labels.device_ptr(),
                         gridWidth,
                         gridHeight,
-                        dx,body.pos,  thrust::raw_pointer_cast(body.rotation_matrix_d.data())
+                        dx,body.pos,  thrust::raw_pointer_cast(body.rotation_matrix_d.data()), body.local_com
                 }
         );
         cudaDeviceSynchronize();
@@ -351,7 +355,7 @@ __host__ int FluidSolver3D::labelGrid() {
                 gridWidth* gridHeight * gridDepth,
                 MarkBodyCellsFunctor {
                         body.sdf_data.device_ptr(),
-                        body.sdf_origin,
+                        body.fileOrigin,
                         body.sdf_cell_size,
                         body.sdf_data.width(),
                         body.sdf_data.height(),
@@ -359,7 +363,7 @@ __host__ int FluidSolver3D::labelGrid() {
                         labels.device_ptr(),
                         gridWidth,
                         gridHeight,
-                        dx, body.pos,  thrust::raw_pointer_cast(body.rotation_matrix_d.data())
+                        dx, body.pos,  thrust::raw_pointer_cast(body.rotation_matrix_d.data()), body.local_com
                 }
         );
     }
@@ -2666,26 +2670,37 @@ struct AccumulateBodyForcesW {
     }
 };
 
-struct PressureForceCalculator {
+struct DragLiftForceCalculator {
     int W, H, D;
     float dx;
+    float rho;              // плотность жидкости
     float3 cm;             // центр масс тела
+    float3 bvel;            //  скорсть центра масс тела
     const int* labels;     // метки ячеек (W×H×D)
-    const float* pressure; // давление в ячейках
+    const float* uField;
+    const float* vField;
+    const float* wField;
     float3* forceAcc;      // аккумулятор силы
     float3* torqueAcc;     // аккумулятор момента
 
     __device__
     void operator()(int idx) const {
         // Преобразуем линейный индекс в 3D координаты
-        int i = idx % W;
-        int j = (idx / W) % H;
-        int k = idx / (W * H);
+        int cell_i = idx % W;
+        int cell_j = (idx / W) % H;
+        int cell_k = idx / (W * H);
 
         // Работаем только с ячейками тела
         if (labels[idx] != Utility::BODY) return;
 
-        // Площадь грани
+         // Вычисляем центр грани в мировых координатах
+            float3 cell_center = make_float3(
+                    (cell_i + 0.5f) * dx,
+                    (cell_j + 0.5f) * dx,
+                    (cell_k + 0.5f) * dx
+            );
+
+        // Площадь грани (панели)
         float area = dx * dx;
 
         // Смещения для соседей (право, лево, верх, низ, перед, зад)
@@ -2714,50 +2729,65 @@ struct PressureForceCalculator {
         };
 
         for (int dir = 0; dir < 6; dir++) {
-            int ni = i + di[dir];
-            int nj = j + dj[dir];
-            int nk = k + dk[dir];
+            int ni = cell_i + di[dir];
+            int nj = cell_j + dj[dir];
+            int nk = cell_k + dk[dir];
 
             // Пропускаем, если сосед выходит за границы
             if (ni < 0 || ni >= W || nj < 0 || nj >= H || nk < 0 || nk >= D)
                 continue;
 
-            int nidx = ni + nj * W + nk * W * H;
+            int nidx = ni + nj * W + nk * W * H; // индекс соседа
 
             // Работаем только с границами тело-жидкость
-            if (labels[nidx] != Utility::FLUID)
-                continue;
-
-            // Вычисляем центр грани в мировых координатах
-            float3 cell_center = make_float3(
-                    (i + 0.5f) * dx,
-                    (j + 0.5f) * dx,
-                    (k + 0.5f) * dx
-            );
+            if (labels[nidx] != Utility::FLUID) continue;
 
             float3 face_center = cell_center + face_offsets[dir] * dx;
+            float3 face_normal = normals[dir];
 
             // Вектор от центра масс к центру грани
             float3 r = face_center - cm;
 
-            // Сила давления (F = -p * A * n)
-            float p = pressure[nidx];
-            float3 F = normals[dir] * (-p * area);
+            float3 u_panel = interpVelDevice3D(uField, vField, wField, W, H, D, dx, face_center);
+            float3 u_rel = bvel - u_panel;
+            float u_rel_abs = sqrtf(u_rel*u_rel) ;
+
+            float alpha_s = 0.5f;
+            float A_p_eff = 0.0f;
+            float n_urel = face_normal * u_rel;
+            if(n_urel > 0){
+                A_p_eff = (n_urel / u_rel_abs * alpha_s + (1-alpha_s)) * area;
+            }
+
+            // drag
+            float Cd = 0.1f;
+            float3 Fdrag = -0.5 * rho * Cd * A_p_eff * u_rel_abs * u_rel;
 
             // Момент (τ = r × F)
-            float3 torque = Utility::cross(r, F);
+            float3 torqueFdrag = Utility::cross(r, Fdrag);
+
+            //lift
+            float Cl = 1.2f;
+            float3 n_x_urel = Utility::cross(face_normal, u_rel);
+            float n_x_urel_abs = sqrt(Utility::cross(face_normal, u_rel) * Utility::cross(face_normal, u_rel));
+            float3 Flift = -0.5f * rho * Cl * A_p_eff * u_rel_abs * (Utility::cross(u_rel, n_x_urel / n_x_urel_abs));
+            float3 torqueFlift = Utility::cross(r, Flift);
+
+            float3 totalFacum = Fdrag + Flift;
+            float3 totalTacum = torqueFdrag + torqueFlift;
 
             // Атомарное добавление
-            atomicAdd(&forceAcc->x, F.x);
-            atomicAdd(&forceAcc->y, F.y);
-            atomicAdd(&forceAcc->z, F.z);
+            atomicAdd(&forceAcc->x, totalFacum.x);
+            atomicAdd(&forceAcc->y, totalFacum.y);
+            atomicAdd(&forceAcc->z, totalFacum.z);
 
-            atomicAdd(&torqueAcc->x, torque.x);
-            atomicAdd(&torqueAcc->y, torque.y);
-            atomicAdd(&torqueAcc->z, torque.z);
+            atomicAdd(&torqueAcc->x, totalTacum.x);
+            atomicAdd(&torqueAcc->y, totalTacum.y);
+            atomicAdd(&torqueAcc->z, totalTacum.z);
         }
     }
 };
+
 void FluidSolver3D::updateBody() {
     if(!activeBody) return;
 
@@ -2835,10 +2865,10 @@ void FluidSolver3D::updateBody() {
 //    );
 
     // Создание функтора
-        PressureForceCalculator calculator = {
-                gridWidth, gridHeight, gridDepth, dx,
-                body.pos,
-                labels.device_ptr(), p.device_ptr(),
+        DragLiftForceCalculator calculator = {
+                gridWidth, gridHeight, gridDepth, dx, FLUID_DENSITY,
+                body.pos, body.vel, labels.device_ptr(),
+                u.device_ptr(), v.device_ptr(), w.device_ptr(),
                 thrust::raw_pointer_cast(forceAcc.data()),
                 thrust::raw_pointer_cast( torqueAcc.data())
         };
@@ -2857,12 +2887,12 @@ void FluidSolver3D::updateBody() {
     float3 totalt = torqueAcc[0];
 
     body.force = body.mass * GRAVITY;
-    //body.force  = body.force + totalF;
-    //body.torque = body.torque + totalt;
+    body.force  = body.force + totalF;
+    body.torque = body.torque + totalt;
     applyBuoyancy();
 
-     std::cout << " Force: " << body.force.x << ", " << body.force.y << ", " << body.force.z
-              << std::endl;
+//     std::cout << " Force: " << body.force.x << ", " << body.force.y << ", " << body.force.z
+//              << std::endl;
 
     // 6) Интегрируем тело
     body.integrate(dt);
@@ -2940,17 +2970,22 @@ void FluidSolver3D::applyBuoyancy() {
     body.sdf_data.copy_to_host();
     labels.host_data = labels.device_data;
 
-    // 2) Параметры SDF-сетки тела
+    // 2) Параметры тела для преобразования координат
+    float3 com = body.pos;                  // Глобальный центр масс/
+    float3 sdf_origin = body.fileOrigin;         // Начало SDF-сетки
+    float3 local_com = body.local_com;           // Центр масс в SDF-системе
+    float cs = body.sdf_cell_size;               // Размер ячейки SDF
+
+    // 3) Параметры SDF-сетки тела
     int sw = body.sdf_data.width();
     int sh = body.sdf_data.height();
     int sd = body.sdf_data.depth();
-    float cs = body.sdf_cell_size;
-    float3 origin = body.sdf_origin;
 
-    // 3) Создаем grid для быстрого поиска частиц в окрестностях
-    float search_radius = 2.0f * dx;  // радиус поиска частиц
-    std::vector<std::vector<int>> grid(w_x_h_x_d);  // 3D grid для частиц
-    float3 domain_min = make_float3(0.0f,0.0f,0.0f);
+    // 4) Создаем grid для быстрого поиска частиц
+    float search_radius = 2.0f * dx;
+    std::vector<std::vector<int>> grid(w_x_h_x_d);
+    float3 domain_min = make_float3(0.0f, 0.0f, 0.0f);
+
     for(int idx = 0; idx < h_particles.size(); ++idx) {
         const auto& p = h_particles[idx];
         int i = clamp(static_cast<int>((p.pos.x - domain_min.x) / dx), 0, gridWidth-1);
@@ -2959,7 +2994,7 @@ void FluidSolver3D::applyBuoyancy() {
         grid[i + j*gridWidth + k*gridWidth*gridHeight].push_back(idx);
     }
 
-    // 4) Перебираем воксели тела, считаем погруженные с учетом реального уровня жидкости
+    // 5) Перебираем воксели тела с учетом поворота
     float totalVolume = 0.0f;
     float submergedVolume = 0.0f;
 
@@ -2969,40 +3004,47 @@ void FluidSolver3D::applyBuoyancy() {
                 int sdfIdx = i + j*sw + k*sw*sh;
                 float sdf_val = body.sdf_data.host_data[sdfIdx];
 
-                // Пропускаем внешние воксели (SDF > 0)
+                // Пропускаем внешние воксели
                 if (sdf_val > 0.0f) continue;
 
-                // Мировые координаты центра вокселя
-                float3 voxel_center = origin + make_float3(
-                        (i + 0.5f) * cs,
-                        (j + 0.5f) * cs,
-                        (k + 0.5f) * cs
+                // Локальные координаты центра вокселя (в системе SDF)
+                float3 p_local = sdf_origin + make_float3(
+                    (i + 0.5f) * cs,
+                    (j + 0.5f) * cs,
+                    (k + 0.5f) * cs
                 );
 
-                // Объем вокселя (с учетом SDF для частично заполненных)
-                float voxel_vol = cs*cs*cs;
+                // Смещение относительно локального центра масс
+                float3 p_centered = p_local - local_com;
 
-                // Для частично заполненных вокселей корректируем объем
+                // Применение поворота
+                float3 p_rotated;
+                p_rotated.x = body.rotation_matrix[0] * p_centered.x + body.rotation_matrix[1] * p_centered.y + body.rotation_matrix[2] * p_centered.z;
+                p_rotated.y = body.rotation_matrix[3] * p_centered.x + body.rotation_matrix[4] * p_centered.y + body.rotation_matrix[5] * p_centered.z;
+                p_rotated.z = body.rotation_matrix[6] * p_centered.x + body.rotation_matrix[7] * p_centered.y + body.rotation_matrix[8] * p_centered.z;
+
+                // Перевод в глобальную систему
+                float3 voxel_center = com + p_rotated;
+
+                // Расчет объема вокселя
+                float voxel_vol = cs * cs * cs;
                 if (sdf_val > -cs) {
                     float fraction = 0.5f - 0.5f * sdf_val / cs;
                     voxel_vol *= fraction;
                 }
-
                 totalVolume += voxel_vol;
 
-                // Проверяем, находится ли воксель в жидкости
+                // Поиск в сетке жидкости (в глобальных координатах)
                 int ii = clamp(static_cast<int>((voxel_center.x - domain_min.x) / dx), 0, gridWidth-1);
                 int jj = clamp(static_cast<int>((voxel_center.y - domain_min.y) / dx), 0, gridHeight-1);
                 int kk = clamp(static_cast<int>((voxel_center.z - domain_min.z) / dx), 0, gridDepth-1);
                 int gridIdx = ii + jj*gridWidth + kk*gridWidth*gridHeight;
 
-                // Вариант 1: Проверка по сетке жидкости
+                // Проверка погруженности
                 bool isSubmerged = false;
                 if (labels.host_data[gridIdx] == Utility::FLUID) {
                     isSubmerged = true;
-                }
-                    // Вариант 2: Проверка по близости к частицам (более точный)
-                else {
+                } else {
                     for (int pidx : grid[gridIdx]) {
                         const auto& p = h_particles[pidx];
                         if (distance(p.pos, voxel_center) < search_radius) {
@@ -3019,18 +3061,17 @@ void FluidSolver3D::applyBuoyancy() {
         }
     }
 
-    // 5) Архимедова сила: F_arch = ρ_fluid · V_submerged · g
+    // 6) Расчет архимедовой силы
     float3 F_arch = -FLUID_DENSITY * submergedVolume * GRAVITY;
 
-    // 6) Добавляем демпфирование для стабилизации
-    float damping = 0.1f;
-    body.force = body.force + F_arch - damping * body.vel * body.mass;
+    // 7) Применение силы к телу с демпфированием
+//    float damping = 0.1f;
+//    body.force = body.force + F_arch - damping * body.vel * body.mass;
 
-    // Отладочная информация
-//    std::cout << "Submerged volume: " << submergedVolume
-//              << " / " << totalVolume
+    // Отладочный вывод
+//    std::cout << "Buoyancy: Submerged " << submergedVolume << "m³ of " << totalVolume << "m³"
 //              << " (" << (submergedVolume/totalVolume)*100 << "%)"
-//              << " Force: " << F_arch.x << ", " << F_arch.y << ", " << F_arch.z
+//              << " Force: (" << F_arch.x << ", " << F_arch.y << ", " << F_arch.z << ") N"
 //              << std::endl;
 }
 
@@ -3041,13 +3082,6 @@ __host__ void FluidSolver3D::frameStep(){
     cudaEvent_t startFstep, stopFstep;
     cudaEventCreate(&startFstep);
     cudaEventCreate(&stopFstep);
-
-    cudaEventRecord(startFstep, 0);
-    updateBody();//////////////////////////////////
-    cudaEventRecord(stopFstep, 0);
-    cudaEventSynchronize(stopFstep);
-    cudaEventElapsedTime(&time, startFstep, stopFstep);
-    updbdTime += time;
 
     cudaEventRecord(startFstep, 0);
     labelGrid();///////////////////////////////////
@@ -3088,7 +3122,14 @@ __host__ void FluidSolver3D::frameStep(){
     cudaEventSynchronize(stopFstep);
     cudaEventElapsedTime(&time, startFstep, stopFstep);
     applprsTime += time;
-    
+
+    cudaEventRecord(startFstep, 0);
+    updateBody();//////////////////////////////////
+    cudaEventRecord(stopFstep, 0);
+    cudaEventSynchronize(stopFstep);
+    cudaEventElapsedTime(&time, startFstep, stopFstep);
+    updbdTime += time;
+
     //grid velocities to particles
     cudaEventRecord(startFstep, 0);
     gridToParticles(PIC_WEIGHT);
@@ -3107,8 +3148,8 @@ __host__ void FluidSolver3D::frameStep(){
 }
 
 __host__ void FluidSolver3D::run(int max_steps) {
-//    csv_file.open("OutputData/csvRes.csv");
-//    csv_file << "frame,centerX1,centerX2,centerX3,angleX1,angleX2,angleX3\n";
+    csv_file.open("OutputData/csvRes.csv");
+    csv_file << "frame,centerX1,centerX2,centerX3,angleX1,angleX2,angleX3\n";
     d_particles = h_particles;
     // Prepare
     cudaEvent_t start, stop;
@@ -3139,19 +3180,18 @@ __host__ void FluidSolver3D::run(int max_steps) {
             if(activeBody)
                 body.exportToPLY("OutputData/body_" + std::to_string(i/iterPerFrame) + ".ply");
 
-//            saveLabelsToPLY("OutputData/labels_" + std::to_string(i/iterPerFrame) + ".ply");
+            //saveLabelsToPLY("OutputData/labels_" + std::to_string(i/iterPerFrame) + ".ply");
 //
-//            float3 angles = Utility::quaternion_to_ship_angles(body.orientation);
-//             csv_file << i/iterPerFrame << ","
-//                 << body.pos.x << ","
-//                  << body.pos.y << ","
-//                  << body.pos.z << ","
-//                  << angles.x << ","   // Крен (roll)
-//                  << angles.y << ","   // Тангаж (pitch)
-//                 << angles.z << "\n"; // Рыскание (yaw)   // << std::setprecision(precision)
-//
-//            // Обеспечиваем немедленную запись на диск
-//            csv_file.flush();
+             csv_file << i/iterPerFrame << ","
+                 << body.pos.x << ","
+                  << body.pos.y << ","
+                  << body.pos.z << ","
+                  << body.theta << ","   // Крен (roll)
+                  << body.psi << ","   // Тангаж (pitch)
+                 << body.phi << "\n"; // Рыскание (yaw)   // << std::setprecision(precision)
+
+            // Обеспечиваем немедленную запись на диск
+            csv_file.flush();
         }
 
     }

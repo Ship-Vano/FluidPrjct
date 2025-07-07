@@ -182,7 +182,7 @@ namespace Utility {
         }
     };
 
-    __device__ bool contains(float* sdf_data, float3 sdf_origin, float3 body_pos, float* rotation_matrix, float3 world_pos, float sdf_cell_size, int sdf_w, int sdf_h, int sdf_d);
+    __device__ bool contains(float* sdf_data, float3 sdf_origin, float3 body_pos, float3 local_com, float* rotation_matrix, float3 world_pos, float sdf_cell_size, int sdf_w, int sdf_h, int sdf_d);
 
     __device__ float3 cross(const float3& a, const float3& b);
 
@@ -203,9 +203,13 @@ namespace Utility {
         float3 torque;      //суммарный момент
 //        float3x3 inertia; // Момент инерции
 //        float3x3 inv_inertia; // Обратный момент инерции
+        float theta;//trim;
+        float psi;//yaw;
+        float phi;//roll;
+        float3 e1;
+        float3 e2;
+        float3 e3;
 
-        // Ориентация (кватернион)
-        float4 orientation = {0.0f, 0.0f, 0.0f, 1.0f}; // x,y,z,w
         // Матрица вращения (кешированная для производительности)
         thrust::host_vector<float> rotation_matrix = {
             1.0f, 0.0f, 0.0f,
@@ -223,6 +227,7 @@ namespace Utility {
         float3 fileOrigin; //локальные координаты начала для sdf
         float3 sdf_origin;      // Минимальный угол сетки SDF (мировые координаты)
         float sdf_cell_size; // Размер ячейки SDF
+        float3 local_com;    // локлаьный центр масс отн. sdf
 
         // Размеры тела в мировых координатах
         float3 size;
@@ -326,6 +331,8 @@ namespace Utility {
 
             std::cout << "SDF loaded successfully. Total values: "
                       << data_size << std::endl;
+
+            local_com = centerInFile;
         }
 
         // Генерация точек поверхности с использованием хост-данных
@@ -341,12 +348,23 @@ namespace Utility {
                     for (int i = 0; i < w; i++) {
                         //int idx = i + j*w + k*w*h;
                         if (fabs(sdf_data(i,j,k)) < density) {
-                            float3 pos = sdf_origin + make_float3(
-                                    i * sdf_cell_size,
-                                    j * sdf_cell_size,
-                                    k * sdf_cell_size
+                            float3 p_local = fileOrigin + make_float3(i * sdf_cell_size, j * sdf_cell_size, k * sdf_cell_size);
+                            // Смещение относительно локального центра масс
+                            float3 p_centered = p_local - local_com;
+                            float3 p_rotated = make_float3(
+                                rotation_matrix[0] * p_centered.x + rotation_matrix[1] * p_centered.y + rotation_matrix[2] * p_centered.z,
+                                rotation_matrix[3] * p_centered.x + rotation_matrix[4] * p_centered.y + rotation_matrix[5] * p_centered.z,
+                                rotation_matrix[6] * p_centered.x + rotation_matrix[7] * p_centered.y + rotation_matrix[8] * p_centered.z
                             );
-                            surface_points.host_data.push_back(pos);
+                            // Перевод в глобальную систему
+                            float3 pos_global = pos + p_rotated;
+//                            float3 p_rel = make_float3(
+//                                rotation_matrix[0] * p_local.x + rotation_matrix[1] * p_local.y  + rotation_matrix[2] * p_local.z,
+//                                rotation_matrix[3] * p_local.x + rotation_matrix[4] * p_local.y  + rotation_matrix[5] * p_local.z,
+//                                rotation_matrix[6] * p_local.x + rotation_matrix[7] * p_local.y  + rotation_matrix[8] * p_local.z
+//                            );
+//                            float3 pos_global = p_rel + pos;
+                            surface_points.host_data.push_back(pos_global);
                         }
                     }
                 }
@@ -388,30 +406,33 @@ namespace Utility {
         void integrate(float dt) {
             // 1) Линейная динамика (semi-implicit Euler):
             float3 accel = force / mass;      // a = F/M
-            //vel = make_float3(1.0f,0.0f,1.0f);
+            //vel = make_float3(0.0f,0.0f,1.0f);
             vel = vel + accel * dt;                // v^{n+1} = v^n + a*dt
             pos = pos + vel * dt;                  // x^{n+1} = x^n + v^{n+1}*dt
 
-            // 2) Угловая динамика
-            float3 ang_accel = torque * inv_inertia; // α = τ/I
-            omega = omega + ang_accel * dt;                // ω^{n+1} = ω^n + α*dt
-            // Кватернионное представление угловой скорости
-            float4 w_quat = {omega.x, omega.y, omega.z, 0.0f};
-            // Вычисление производной: dq/dt = 0.5 * q * w_quat
-            float4 dq = Utility::multiply_quaternions(orientation, w_quat);
-            dq.x *= 0.5f * dt;
-            dq.y *= 0.5f * dt;
-            dq.z *= 0.5f * dt;
-            dq.w *= 0.5f * dt;
-            // Обновление кватерниона
-            orientation.x += dq.x;
-            orientation.y += dq.y;
-            orientation.z += dq.z;
-            orientation.w += dq.w;
-
-            // Нормализация
-            normalize_quaternion(orientation);
             update_rotation_matrix();
+
+            // 2) Угловая динамика
+            float3 tau_local = make_float3(
+                rotation_matrix[0] * torque.x + rotation_matrix[3] * torque.y  + rotation_matrix[6] * torque.z,
+                rotation_matrix[1] * torque.x + rotation_matrix[4] * torque.y  + rotation_matrix[7] * torque.z,
+                rotation_matrix[2] * torque.x + rotation_matrix[5] * torque.y  + rotation_matrix[8] * torque.z
+            );
+            float3 angAccel = inv_inertia * tau_local;
+            omega = omega + angAccel * dt;
+            // Производные углов (формулы для порядка: trim -> yaw -> roll)
+            float dtheta_dt = omega.y * cos(phi) - omega.z * sin(phi);
+            float dpsi_dt = (omega.y * sin(phi) + omega.z * cos(phi)) / cos(theta);
+            float dphi_dt = omega.x + dpsi_dt * sin(theta);
+
+            // Интегрирование углов
+            theta += dtheta_dt * dt;
+            psi += dpsi_dt * dt;
+            phi += dphi_dt * dt;
+
+            // Ограничение углов для избежания сингулярностей
+//            const float maxAngle = 0.99f * M_PI/2;
+//            theta = clamp(theta, -maxAngle, maxAngle);
 
             // 3) Сдвигаем SDF‑origin вместе с pos, чтобы “коробка” SDF двигалась
             //    так, чтобы её центр снова совпадал с pos
@@ -443,24 +464,25 @@ namespace Utility {
 
         // Метод для обновления матрицы вращения из кватерниона
         void update_rotation_matrix() {
-            float qx = orientation.x;
-            float qy = orientation.y;
-            float qz = orientation.z;
-            float qw = orientation.w;
+            rotation_matrix[0] = cos(theta)*cos(psi);
+            rotation_matrix[1] = sin(theta)*sin(phi) - cos(theta)*cos(phi)*sin(psi);
+            rotation_matrix[2] = cos(phi)*sin(theta)+cos(theta)*sin(phi)*sin(psi);
 
-            rotation_matrix[0] = 1.0f - 2.0f*qy*qy - 2.0f*qz*qz;
-            rotation_matrix[1] = 2.0f*qx*qy - 2.0f*qz*qw;
-            rotation_matrix[2] = 2.0f*qx*qz + 2.0f*qy*qw;
+            rotation_matrix[3] = sin(psi);
+            rotation_matrix[4] = cos(phi)*cos(psi);
+            rotation_matrix[5] = -cos(psi)*sin(phi);
 
-            rotation_matrix[3] = 2.0f*qx*qy + 2.0f*qz*qw;
-            rotation_matrix[4] = 1.0f - 2.0f*qx*qx - 2.0f*qz*qz;
-            rotation_matrix[5] = 2.0f*qy*qz - 2.0f*qx*qw;
-
-            rotation_matrix[6] = 2.0f*qx*qz - 2.0f*qy*qw;
-            rotation_matrix[7] = 2.0f*qy*qz + 2.0f*qx*qw;
-            rotation_matrix[8] = 1.0f - 2.0f*qx*qx - 2.0f*qy*qy;
+            rotation_matrix[6] = -cos(psi)*sin(theta);
+            rotation_matrix[7] = cos(theta)*sin(phi) + cos(phi)*sin(theta)*sin(psi);
+            rotation_matrix[8] = cos(theta)*cos(phi) - sin(theta)*sin(phi)*sin(psi);
 
             rotation_matrix_d = rotation_matrix;
+        }
+
+        void recalculateAngles(){
+            theta = atan(-e1.z / e1.x);
+            psi = atan2(e1.y, e1.x / cos(theta));
+            phi = asin(- e3.y / cos(psi));
         }
     };
 

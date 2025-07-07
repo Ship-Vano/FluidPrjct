@@ -160,58 +160,49 @@ namespace Utility {
         return {ind % (gridWidth), ind / (gridWidth)}; // i, j для v-компоненты
     }
 
-    __device__ bool contains(float* sdf_data, float3 sdf_origin, float3 body_pos, float* rotation_matrix, float3 world_pos, float sdf_cell_size, int sdf_w, int sdf_h, int sdf_d){
-        // 1. Преобразование в локальные координаты тела (относительно центра масс)
-        float3 local_pos = world_pos - body_pos;
-        float3 rotated_pos;
-        rotated_pos.x = rotation_matrix[0] * local_pos.x
-                        + rotation_matrix[3] * local_pos.y
-                        + rotation_matrix[6] * local_pos.z;
+    __device__ bool contains(float* sdf_data, float3 sdf_origin, float3 body_pos, float3 local_com, float* rotation_matrix, float3 world_pos, float sdf_cell_size, int sdf_w, int sdf_h, int sdf_d){
+        // 1. Преобразование в локальные координаты тела
+        float3 p_rel = world_pos - body_pos;
 
-        rotated_pos.y = rotation_matrix[1] * local_pos.x
-                        + rotation_matrix[4] * local_pos.y
-                        + rotation_matrix[7] * local_pos.z;
+        // 2. Обратное вращение: p_local_centered = R^T * p_rel
+        float3 p_local_centered;
+        p_local_centered.x = rotation_matrix[0] * p_rel.x
+                           + rotation_matrix[3] * p_rel.y
+                           + rotation_matrix[6] * p_rel.z;
 
-        rotated_pos.z = rotation_matrix[2] * local_pos.x
-                        + rotation_matrix[5] * local_pos.y
-                        + rotation_matrix[8] * local_pos.z;
-        // 3. Преобразование в координаты SDF сетки
+        p_local_centered.y = rotation_matrix[1] * p_rel.x
+                           + rotation_matrix[4] * p_rel.y
+                           + rotation_matrix[7] * p_rel.z;
+
+        p_local_centered.z = rotation_matrix[2] * p_rel.x
+                           + rotation_matrix[5] * p_rel.y
+                           + rotation_matrix[8] * p_rel.z;
+
+        // 3. Переход в SDF-систему: добавляем локальный центр масс
+        float3 p_local = p_local_centered + local_com;
+
+        // 4. Преобразование в координаты SDF сетки
         float3 sdf_coord = {
-                (rotated_pos.x - sdf_origin.x + body_pos.x) / sdf_cell_size,
-                (rotated_pos.y - sdf_origin.y + body_pos.y) / sdf_cell_size,
-                (rotated_pos.z - sdf_origin.z + body_pos.z) / sdf_cell_size
+            (p_local.x - sdf_origin.x) / sdf_cell_size,
+            (p_local.y - sdf_origin.y) / sdf_cell_size,
+            (p_local.z - sdf_origin.z) / sdf_cell_size
         };
-        // 4. Проверка границ сетки
-        int w = sdf_w;
-        int h = sdf_h;
-        int d = sdf_d;
-
-        if (sdf_coord.x < 0 || sdf_coord.x >= w ||
-            sdf_coord.y < 0 || sdf_coord.y >= h ||
-            sdf_coord.z < 0 || sdf_coord.z >= d)
+        // 5. Проверка границ сетки
+        if (sdf_coord.x < 0 || sdf_coord.x >= sdf_w ||
+            sdf_coord.y < 0 || sdf_coord.y >= sdf_h ||
+            sdf_coord.z < 0 || sdf_coord.z >= sdf_d)
         {
             return false;
         }
-        // 5. Определение базовых индексов
-        int i = min(static_cast<int>(sdf_coord.x), w - 1);
-        int j = min(static_cast<int>(sdf_coord.y), h - 1);
-        int k = min(static_cast<int>(sdf_coord.z), d - 1);
 
-        // 6. Проверка значения SDF
-        int idx = i + j * w + k * w * h;
+        // 6. Определение индексов
+        int i = min(static_cast<int>(sdf_coord.x), sdf_w - 1);
+        int j = min(static_cast<int>(sdf_coord.y), sdf_h - 1);
+        int k = min(static_cast<int>(sdf_coord.z), sdf_d - 1);
+
+        // 7. Проверка значения SDF
+        int idx = i + j * sdf_w + k * sdf_w * sdf_h;
         return sdf_data[idx] <= 0.0f;
-        //oldd ver
-//        float3 local_pos = (world_pos - sdf_origin) / sdf_cell_size;
-//        int i = static_cast<int>(local_pos.x);
-//        int j = static_cast<int>(local_pos.y);
-//        int k = static_cast<int>(local_pos.z);
-//
-//        if (i < 0 || i >= sdf_w ||
-//            j < 0 || j >= sdf_h ||
-//            k < 0 || k >= sdf_d) return false;
-//
-//        int idx = i + j * sdf_w + k * sdf_w * sdf_h;
-//        return sdf_data[idx] <= 0.0f;
     }
 
     __device__ float3 cross(const float3& a, const float3& b){
