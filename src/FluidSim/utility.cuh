@@ -184,7 +184,7 @@ namespace Utility {
 
     __device__ bool contains(float* sdf_data, float3 sdf_origin, float3 body_pos, float3 local_com, float* rotation_matrix, float3 world_pos, float sdf_cell_size, int sdf_w, int sdf_h, int sdf_d);
 
-    __device__ float3 cross(const float3& a, const float3& b);
+    __host__ __device__ float3 cross(const float3& a, const float3& b);
 
     __device__ float sampleBody(float3 bodyVel, float3 bodyOmega, float3 bodyCM, float3 facePos, float3 normal); //получить нормальную скорость тела на данной грани
 
@@ -197,6 +197,7 @@ namespace Utility {
         float3 vel; // Скорость
         float3 force; // Суммарная сила
         float mass; // Масса тела
+        float volume; // объём тела
         float inertia;       // Момент инерции (скалярное упрощение)
         float inv_inertia;   // Обратный момент инерции
         float3 omega;       //угловая скорость
@@ -211,16 +212,8 @@ namespace Utility {
         float3 e3;
 
         // Матрица вращения (кешированная для производительности)
-        thrust::host_vector<float> rotation_matrix = {
-            1.0f, 0.0f, 0.0f,
-            0.0f, 1.0f, 0.0f,
-            0.0f, 0.0f, 1.0f
-        };
-        thrust::device_vector<float> rotation_matrix_d = {
-                1.0f, 0.0f, 0.0f,
-                0.0f, 1.0f, 0.0f,
-                0.0f, 0.0f, 1.0f
-        };
+        thrust::host_vector<float> rotation_matrix;
+        thrust::device_vector<float> rotation_matrix_d;
 
         // SDF данные
         Grid3D<float> sdf_data;
@@ -236,6 +229,13 @@ namespace Utility {
 
         // Метод для загрузки SDF
         void loadSDF(const std::string& filename, const float3& initial_position) {
+
+            rotation_matrix.resize(9);
+            rotation_matrix[0] = 1.0f; rotation_matrix[1] = 0.0f; rotation_matrix[2] = 0.0f;
+            rotation_matrix[3] = 0.0f; rotation_matrix[4] = 1.0f; rotation_matrix[5] = 0.0f;
+            rotation_matrix[6] = 0.0f; rotation_matrix[7] = 0.0f; rotation_matrix[8] = 1.0f;
+            rotation_matrix_d = rotation_matrix;
+
             // Открываем файл в текстовом режиме
             std::ifstream file(filename);
             if (!file.is_open()) {
@@ -290,7 +290,7 @@ namespace Utility {
 
             // 7. Читаем данные SDF
             size_t data_size = w * h * d;
-             std::vector<float> temp_data(data_size);
+            std::vector<float> temp_data(data_size);
 
             // Порядок: k (слои) → j (строки) → i (столбцы)
             for (int k = 0; k < d; ++k) {
@@ -333,6 +333,8 @@ namespace Utility {
                       << data_size << std::endl;
 
             local_com = centerInFile;
+
+            volume = (4.0f / 3.0f)* 3.14159265358979323846 * size.x * size.x * size.x;
         }
 
         // Генерация точек поверхности с использованием хост-данных
@@ -398,17 +400,21 @@ namespace Utility {
         }
 
         void clearAccumulators() {
-            force  = make_float3(0,0,0);
-            torque = make_float3(0,0,0);
+            force  = make_float3(0.0f,0.0f,0.0f);
+            torque = make_float3(0.0f,0.0f,0.0f);
         }
 
         //передвижение твёрдого тела за dt
         void integrate(float dt) {
             // 1) Линейная динамика (semi-implicit Euler):
             float3 accel = force / mass;      // a = F/M
-            //vel = make_float3(0.0f,0.0f,1.0f);
+            //vel = make_float3(1.0f,0.0f,1.0f);
             vel = vel + accel * dt;                // v^{n+1} = v^n + a*dt
             pos = pos + vel * dt;                  // x^{n+1} = x^n + v^{n+1}*dt
+            
+            // Ограничение углов для избежания сингулярностей
+            const float maxAngle = 3.14159265358979323846;
+            theta = std::clamp(theta, -maxAngle, maxAngle);
 
             update_rotation_matrix();
 
@@ -430,9 +436,7 @@ namespace Utility {
             psi += dpsi_dt * dt;
             phi += dphi_dt * dt;
 
-            // Ограничение углов для избежания сингулярностей
-//            const float maxAngle = 0.99f * M_PI/2;
-//            theta = clamp(theta, -maxAngle, maxAngle);
+            
 
             // 3) Сдвигаем SDF‑origin вместе с pos, чтобы “коробка” SDF двигалась
             //    так, чтобы её центр снова совпадал с pos

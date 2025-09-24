@@ -205,7 +205,7 @@ namespace Utility {
         return sdf_data[idx] <= 0.0f;
     }
 
-    __device__ float3 cross(const float3& a, const float3& b){
+    __host__ __device__ float3 cross(const float3& a, const float3& b){
         return make_float3(
                 a.y * b.z - a.z * b.y,
                 a.z * b.x - a.x * b.z,

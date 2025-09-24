@@ -161,12 +161,13 @@ __host__ void FluidSolver3D::init(const std::string& fileName) {
         // Физические свойства
         body.mass = bodyMass;
         body.vel = make_float3(0.0f, 0.0f, 0.0f);
-        body.force = make_float3(0.0f, 0.0f, 0.0f);
+        body.force = make_float3(0.0f, -0.8f, 0.0f);
 
         // Момент инерции (для сферы)
         float radius = body.size.x / 2.0f;  // Предполагаем сферическое тело
         body.inertia = 0.4f * body.mass * radius * radius;
         body.inv_inertia = 1.0f / body.inertia;
+        body.force = make_float3(0.0f,0.0f,0.0f);
         body.omega = make_float3(0.0f, 0.0f, 0.0f); //угловая скорость
         body.torque = make_float3(0.0f,0.0f,0.0f);      // суммарный момент
         body.theta = 0.0f;
@@ -2767,7 +2768,8 @@ struct DragLiftForceCalculator {
             float3 torqueFdrag = Utility::cross(r, Fdrag);
 
             //lift
-            float Cl = 1.2f;
+            //float Cl = 0.5f;
+            float Cl = 0.1f;
             float3 n_x_urel = Utility::cross(face_normal, u_rel);
             float n_x_urel_abs = sqrt(Utility::cross(face_normal, u_rel) * Utility::cross(face_normal, u_rel));
             float3 Flift = -0.5f * rho * Cl * A_p_eff * u_rel_abs * (Utility::cross(u_rel, n_x_urel / n_x_urel_abs));
@@ -2805,65 +2807,6 @@ void FluidSolver3D::updateBody() {
     thrust::device_vector<float3> forceAcc(1, make_float3(0.0f,0.0f,0.0f));
     thrust::device_vector<float3> torqueAcc(1, make_float3(0.0f,0.0f,0.0f));
 
-    //float inv_dx3 = FLUID_DENSITY * dx*dx*dx;  // m_i = ρ·dx³
-
-//    // 3) Параллельно проходим по U‑узлам
-//    thrust::for_each_n(
-//            thrust::device,
-//            thrust::make_counting_iterator<int>(0),
-//            Usize,
-//            AccumulateBodyForcesU{
-//                    gridWidth, gridHeight, gridDepth,
-//                    dx, dt, FLUID_DENSITY,
-//                    body.pos,
-////                    body.vel,
-////                    body.omega,
-//                    thrust::raw_pointer_cast(labels.device_data.data()),
-//                    thrust::raw_pointer_cast(uStar.data()),
-//                    thrust::raw_pointer_cast(u.device_data.data()),
-//                    thrust::raw_pointer_cast(forceAcc.data()),
-//                    thrust::raw_pointer_cast(torqueAcc.data())
-//            }
-//    );
-//
-//    cudaDeviceSynchronize();
-//
-//    thrust::for_each_n(
-//            thrust::device,
-//            thrust::make_counting_iterator<int>(0),
-//            Vsize,
-//            AccumulateBodyForcesV{
-//                    gridWidth, gridHeight, gridDepth,
-//                    dx, dt, FLUID_DENSITY,
-//                    body.pos,
-//                    thrust::raw_pointer_cast(labels.device_data.data()),
-//                    thrust::raw_pointer_cast(vStar.data()),
-//                    thrust::raw_pointer_cast(v.device_data.data()),
-//                    thrust::raw_pointer_cast(forceAcc.data()),
-//                    thrust::raw_pointer_cast(torqueAcc.data())
-//            }
-//    );
-//
-//    cudaDeviceSynchronize();
-//
-//    thrust::for_each_n(
-//            thrust::device,
-//            thrust::make_counting_iterator<int>(0),
-//            Wsize,
-//            AccumulateBodyForcesW{
-//                    gridWidth, gridHeight, gridDepth,
-//                    dx, dt, FLUID_DENSITY,
-//                    body.pos,
-////                    body.vel,
-////                    body.omega,
-//                    thrust::raw_pointer_cast(labels.device_data.data()),
-//                    thrust::raw_pointer_cast(wStar.data()),
-//                    thrust::raw_pointer_cast(w.device_data.data()),
-//                    thrust::raw_pointer_cast(forceAcc.data()),
-//                    thrust::raw_pointer_cast(torqueAcc.data())
-//            }
-//    );
-
     // Создание функтора
         DragLiftForceCalculator calculator = {
                 gridWidth, gridHeight, gridDepth, dx, FLUID_DENSITY,
@@ -2886,7 +2829,8 @@ void FluidSolver3D::updateBody() {
     float3 totalF  = forceAcc[0];
     float3 totalt = torqueAcc[0];
 
-    body.force = body.mass * GRAVITY;
+    body.force = body.force + body.mass * GRAVITY;
+    //body.torque = body.torque + Utility::cross(body.pos, body.force);
     body.force  = body.force + totalF;
     body.torque = body.torque + totalt;
     applyBuoyancy();
@@ -2965,6 +2909,11 @@ __host__ __device__ float distance(const float3& a, const float3& b) {
     float dz = a.z - b.z;
     return sqrtf(dx*dx + dy*dy + dz*dz);
 }
+
+void FluidSolver3D::applyBuoyancy2(){
+    
+}
+
 void FluidSolver3D::applyBuoyancy() {
     // 1) Копируем необходимые данные на хост
     body.sdf_data.copy_to_host();
@@ -3009,9 +2958,9 @@ void FluidSolver3D::applyBuoyancy() {
 
                 // Локальные координаты центра вокселя (в системе SDF)
                 float3 p_local = sdf_origin + make_float3(
-                    (i + 0.5f) * cs,
-                    (j + 0.5f) * cs,
-                    (k + 0.5f) * cs
+                    (i) * cs,
+                    (j) * cs,
+                    (k) * cs
                 );
 
                 // Смещение относительно локального центра масс
@@ -3063,7 +3012,8 @@ void FluidSolver3D::applyBuoyancy() {
 
     // 6) Расчет архимедовой силы
     float3 F_arch = -FLUID_DENSITY * submergedVolume * GRAVITY;
-
+    body.force = body.force + F_arch;
+    //body.torque = body.torque + Utility::cross(body.pos, F_arch);
     // 7) Применение силы к телу с демпфированием
 //    float damping = 0.1f;
 //    body.force = body.force + F_arch - damping * body.vel * body.mass;
